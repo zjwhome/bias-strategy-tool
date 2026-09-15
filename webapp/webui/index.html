@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>乖离率策略 · 每日参考</title>
+<style>
+:root{
+  --bg:#f4f6fb; --card:#ffffff; --line:#e6eaf2; --ink:#1a2233; --ink2:#5b6880;
+  --up:#d92b2b;      /* 涨 = 红（国内惯例） */
+  --down:#12a05c;    /* 跌 = 绿 */
+  --brand:#2f6bff; --warn:#f59e0b; --muted:#8b96ad;
+  --shadow:0 2px 10px rgba(24,40,80,.06);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;
+  font-size:14px;line-height:1.6;padding:0 0 60px}
+.wrap{max-width:1080px;margin:0 auto;padding:0 18px}
+
+/* ---------- 顶栏 ---------- */
+header{background:linear-gradient(135deg,#1f3a8a,#2f6bff);color:#fff;padding:18px 0;margin-bottom:20px;
+  box-shadow:0 4px 16px rgba(47,107,255,.22)}
+header .wrap{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.h-title{font-size:19px;font-weight:700;letter-spacing:.5px}
+.h-sub{font-size:12.5px;opacity:.85;margin-top:2px}
+.h-right{font-size:12.5px;text-align:right;opacity:.95;line-height:1.7}
+.btn{border:0;border-radius:9px;padding:9px 16px;font-size:13.5px;font-weight:600;cursor:pointer;
+  background:#fff;color:#1f3a8a;transition:.15s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.14)}
+.btn:disabled{opacity:.55;cursor:not-allowed;transform:none}
+.btn.ghost{background:rgba(255,255,255,.16);color:#fff;border:1px solid rgba(255,255,255,.35)}
+
+/* ---------- 卡片 ---------- */
+.card{background:var(--card);border-radius:14px;box-shadow:var(--shadow);padding:20px 22px;margin-bottom:18px;
+  border:1px solid var(--line)}
+.card h2{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.card h2 .tag{font-size:11px;font-weight:600;color:var(--muted);background:#f0f3f9;border-radius:6px;padding:2px 8px}
+
+/* ---------- 广度大卡 ---------- */
+.breadth-row{display:flex;gap:22px;align-items:stretch;flex-wrap:wrap}
+.breadth-box{flex:0 0 218px;border-radius:14px;padding:20px;text-align:center;color:#fff;
+  display:flex;flex-direction:column;justify-content:center;transition:.2s}
+.breadth-box .num{font-size:52px;font-weight:800;line-height:1.05;letter-spacing:-1px}
+.breadth-box .lab{font-size:12.5px;opacity:.92;margin-top:4px}
+.breadth-box .th{font-size:12px;opacity:.85;margin-top:8px;border-top:1px solid rgba(255,255,255,.3);padding-top:8px}
+.bid-ok{background:linear-gradient(135deg,#d92b2b,#ff5a4d)}       /* 达标 = 红（可动手） */
+.bid-no{background:linear-gradient(135deg,#4b5563,#6b7280)}       /* 未达标 = 灰 */
+.bid-na{background:linear-gradient(135deg,#9ca3af,#cbd5e1)}
+.breadth-info{flex:1;min-width:260px;display:flex;flex-direction:column;justify-content:center;gap:12px}
+.action{border-radius:12px;padding:16px 18px;font-size:16.5px;font-weight:700;border:1px solid}
+.act-ok{background:#fff5f5;color:#c81e1e;border-color:#ffd4d4}
+.act-no{background:#f5f7fa;color:#4b5563;border-color:#e3e8f0}
+.meta{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;color:var(--ink2)}
+.meta b{color:var(--ink);font-weight:700}
+.kv{background:#f7f9fc;border-radius:9px;padding:8px 12px}
+
+/* ---------- 表格 ---------- */
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{padding:9px 10px;text-align:right;border-bottom:1px solid #eef1f7;white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:12.5px;background:#fafbfe}
+th:first-child,td:first-child{text-align:left}
+tbody tr:hover{background:#f8fAff}
+td.num{font-variant-numeric:tabular-nums}
+.up{color:var(--up);font-weight:600}
+.down{color:var(--down);font-weight:600}
+
+/* ---------- 其他 ---------- */
+.empty{color:var(--muted);text-align:center;padding:26px 0;font-size:13.5px}
+.chart-wrap{position:relative;height:250px}
+canvas{width:100%;height:250px;display:block}
+.legend{display:flex;gap:18px;font-size:12.5px;color:var(--ink2);margin-top:10px;flex-wrap:wrap}
+.legend i{display:inline-block;width:16px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.banner{border-radius:10px;padding:12px 16px;font-size:13.5px;margin-bottom:14px;display:none}
+.banner.show{display:block}
+.banner.info{background:#eef4ff;color:#1e40af;border:1px solid #d6e3ff}
+.banner.err{background:#fff1f1;color:#b91c1c;border:1px solid #ffd4d4}
+
+/* 持仓 */
+.alert-pill{display:inline-block;border-radius:6px;padding:2px 7px;font-size:11.5px;font-weight:600;margin-right:5px}
+.lv-danger{background:#ffe8e8;color:#c81e1e}
+.lv-win{background:#fdeee9;color:#c2410c}
+.lv-warn{background:#fff7e6;color:#b45309}
+.lv-ok{background:#eef2f7;color:#5b6880}
+.hform{display:flex;gap:9px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px;
+  background:#f7f9fc;border-radius:11px;padding:14px}
+.hform label{font-size:12px;color:var(--ink2);display:block;margin-bottom:4px}
+.hform input{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13.5px;width:118px;
+  background:#fff;color:var(--ink)}
+.hform input:focus{outline:none;border-color:var(--brand)}
+.mini{font-size:12px;color:var(--muted)}
+footer{text-align:center;color:var(--muted);font-size:12px;margin-top:26px;line-height:1.9}
+
+/* ---------- 任务中心 ---------- */
+.task{border:1px solid var(--line);border-radius:12px;padding:15px 17px;margin-bottom:13px;
+  background:#fcfdff;transition:.15s}
+.task:hover{border-color:#cfdcff;box-shadow:0 2px 10px rgba(47,107,255,.07)}
+.task.running{border-color:#9db6ff;background:#f7faff}
+.task-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.task-title{font-size:15px;font-weight:700;display:flex;align-items:center;gap:7px}
+.task-title .ico{font-size:17px}
+.chip{font-size:11px;font-weight:600;color:#5b6880;background:#eef2f8;border-radius:6px;padding:2px 7px}
+.chip.on{background:#e6f0ff;color:#1d4ed8}
+.chip.off{background:#f1f3f7;color:#8b96ad}
+.task-desc{font-size:13px;color:var(--ink2);margin-top:6px;line-height:1.7}
+.task-more{font-size:12.5px;color:var(--muted);margin-top:5px;line-height:1.7;
+  border-left:3px solid #e6eaf2;padding-left:10px;display:none}
+.task-more.show{display:block}
+.task-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:13px;
+  padding-top:12px;border-top:1px dashed #e6eaf2}
+.btn.sm{padding:7px 14px;font-size:13px;border-radius:8px}
+.btn.primary{background:#2f6bff;color:#fff}
+.btn.ghost2{background:#fff;color:#334155;border:1px solid var(--line)}
+.task-row input[type=time]{border:1px solid var(--line);border-radius:8px;padding:6px 8px;
+  font-size:13px;background:#fff;color:var(--ink)}
+.days{display:flex;gap:5px}
+.days label{font-size:12px;display:flex;align-items:center;gap:3px;cursor:pointer;
+  background:#fff;border:1px solid var(--line);border-radius:6px;padding:4px 7px;color:var(--ink2)}
+.days input{margin:0}
+.sw{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink2);cursor:pointer;
+  background:#fff;border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+.task-last{margin-top:11px;font-size:12.5px;color:var(--ink2);display:flex;gap:10px;
+  align-items:center;flex-wrap:wrap}
+.task-prog{margin-top:10px;display:none}
+.task-prog.show{display:block}
+.pbar{height:7px;background:#eef2f8;border-radius:4px;overflow:hidden}
+.pbar i{display:block;height:100%;background:linear-gradient(90deg,#2f6bff,#6b9bff);width:0;transition:.3s}
+.pmsg{font-size:12px;color:var(--muted);margin-top:5px}
+.blk{margin-top:12px;border-top:1px solid #eef1f7;padding-top:11px}
+.blk:first-child{border-top:0;padding-top:0}
+.blk-t{font-size:13.5px;font-weight:700;margin-bottom:8px;color:var(--ink)}
+.blk-txt{font-size:13px;color:var(--ink2);line-height:1.85;white-space:pre-wrap}
+.blk-txt b{color:#c81e1e}
+.st-ok{color:#12a05c;font-weight:700}
+.st-fail{color:#c81e1e;font-weight:700}
+.st-running{color:#2f6bff;font-weight:700}
+details.hist{margin-top:10px}
+details.hist summary{font-size:12.5px;color:var(--brand);cursor:pointer;list-style:none}
+details.hist summary::-webkit-details-marker{display:none}
+details.hist summary:before{content:"▸ ";}
+details.hist[open] summary:before{content:"▾ ";}
+.hist-body{font-size:12.5px;color:var(--ink2);margin-top:8px;line-height:1.8}
+.hist-item{border-bottom:1px dashed #eef1f7;padding:7px 0}
+.hist-item:last-child{border-bottom:0}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div>
+      <div class="h-title">📊 乖离率策略 · 每日参考</div>
+      <div class="h-sub">超跌抄底 · 只在"该出手的日子"出手</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px">
+      <div class="h-right" id="hRight">加载中…</div>
+      <button class="btn ghost" id="btnUpdate">更新数据</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="banner info" id="banner"></div>
+
+  <!-- 今日广度 -->
+  <div class="card">
+    <h2>今日广度 <span class="tag" id="tagDate">—</span></h2>
+    <div class="breadth-row">
+      <div class="breadth-box bid-na" id="breadthBox">
+        <div class="num" id="breadthNum">—</div>
+        <div class="lab">全市场信号股票数</div>
+        <div class="th" id="breadthTh">门槛 ≥ 50</div>
+      </div>
+      <div class="breadth-info">
+        <div class="action act-no" id="actionText">加载中…</div>
+        <div class="meta">
+          <div class="kv">交易日：<b id="mDate">—</b></div>
+          <div class="kv">更新时间：<b id="mUpd">—</b></div>
+          <div class="kv">仅乖离率≤-15%：<b id="mBias">—</b> 只</div>
+          <div class="kv">全市场：<b id="mTotal">—</b> 只</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 任务中心 -->
+  <div class="card" id="taskCard">
+    <h2>任务中心 <span class="tag">什么时候跑，由你决定</span></h2>
+    <div class="banner info show" style="margin-bottom:15px">
+      ★ 三个任务默认<b>全都是「不定时」</b>的。你可以随时点「立即执行」马上跑一次，
+      或者打开「定时执行」开关，让它每天到点自动跑。<b>网站本身绝不会自己偷偷定时。</b>
+    </div>
+    <div id="taskList"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 历史广度 -->
+  <div class="card">
+    <h2>历史广度走势 <span class="tag">近 250 个交易日</span></h2>
+    <div class="chart-wrap"><canvas id="chart" width="1020" height="250"></canvas></div>
+    <div class="legend">
+      <span><i style="background:#2f6bff"></i>每日广度</span>
+      <span><i style="background:#f59e0b"></i>出手门槛（50）</span>
+      <span class="mini">柱子越高＝市场越恐慌＝机会越大</span>
+    </div>
+  </div>
+
+  <!-- 候选股 -->
+  <div class="card">
+    <h2>今日候选股 <span class="tag" id="tagCand">仅达标时显示</span></h2>
+    <div id="candBox"><div class="empty">广度未达标，今天不用看个股。</div></div>
+  </div>
+
+  <!-- 我的持仓 -->
+  <div class="card">
+    <h2>我的持仓 <span class="tag">止损 -6% · 止盈 +6%/+10% · 最长 10 日</span></h2>
+    <div class="hform">
+      <div><label>股票代码</label><input id="fCode" placeholder="如 300274"></div>
+      <div><label>名称（可空）</label><input id="fName" placeholder="自动填"></div>
+      <div><label>买入日期</label><input id="fDate" type="date"></div>
+      <div><label>买入价</label><input id="fPrice" placeholder="如 91.50"></div>
+      <div><label>股数（可空）</label><input id="fShares" placeholder="0"></div>
+      <button class="btn" id="btnAdd" style="background:#2f6bff;color:#fff">加入持仓</button>
+    </div>
+    <div id="holdBox"><div class="empty">还没有持仓记录。</div></div>
+  </div>
+
+  <footer>
+    本工具仅提供数据参考，<b>不构成投资建议</b>。数据来源：新浪财经（本地缓存）。<br>
+    只在广度 ≥ 门槛（高胜率窗口）时出手；其余时间空仓等待，是策略的一部分。
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => (n===null||n===undefined||isNaN(n)) ? "—" : n;
+
+function showBanner(msg, type){
+  const b=$("banner"); b.className="banner show "+(type||"info"); b.textContent=msg;
+}
+function hideBanner(){ $("banner").className="banner"; }
+
+async function jget(url){ const r=await fetch(url); return r.json(); }
+async function jpost(url, body, method){
+  const r=await fetch(url,{method:method||"POST",headers:{"Content-Type":"application/json"},
+    body:body?JSON.stringify(body):null});
+  return r.json();
+}
+
+async function loadStatus(){
+  try{
+    const s=await jget("/api/status");
+    $("hRight").innerHTML = s.last_date
+      ? `数据日期 <b>${s.last_date}</b><br>更新于 ${(s.updated_at||"").replace("T"," ")}`
+      : "尚无数据";
+  }catch(e){ $("hRight").textContent="后端未连接"; }
+}
+
+async function loadToday(){
+  const t=await jget("/api/today");
+  if(!t.ok){
+    showBanner(t.msg||"尚无数据，请点右上角「更新数据」。","err");
+    return;
+  }
+  hideBanner();
+  $("tagDate").textContent = t.date;
+  $("breadthNum").textContent = t.breadth;
+  $("breadthTh").textContent = "门槛 ≥ "+t.threshold;
+  const box=$("breadthBox");
+  box.className = "breadth-box " + (t.triggered?"bid-ok":"bid-no");
+  const act=$("actionText");
+  act.textContent = t.action;
+  act.className = "action " + (t.triggered?"act-ok":"act-no");
+  $("mDate").textContent = t.date;
+  $("mUpd").textContent = (t.updated_at||"").replace("T"," ");
+  $("mBias").textContent = fmt(t.bias_only);
+  $("mTotal").textContent = fmt(t.stocks_total);
+
+  // 候选股
+  const cb=$("candBox");
+  $("tagCand").textContent = t.triggered ? t.candidates.length+" 只" : "仅达标时显示";
+  if(!t.candidates.length){
+    cb.innerHTML = t.triggered
+      ? '<div class="empty">达标但无符合条件的个股（极少见）。</div>'
+      : '<div class="empty">广度未达标，今天不用看个股。</div>';
+  }else{
+    let h='<table><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
+          '<th>换手%</th><th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
+    for(const c of t.candidates){
+      const cls = (c.chg5d||0)<0 ? "down" : "up";
+      // 各字段都可能为 null（数据缺失），统一用 fmt() 兜底，避免 toFixed 抛错
+      h+=`<tr><td>${c.code}</td><td>${c.name||""}</td>`+
+         `<td class="num">${fmt(c.close!=null?(+c.close).toFixed(2):null)}</td>`+
+         `<td class="num down">${fmt(c.bias!=null?(+c.bias).toFixed(2):null)}</td>`+
+         `<td class="num">${fmt(c.turnover_pct!=null?(+c.turnover_pct).toFixed(2):null)}</td>`+
+         `<td class="num">${fmt(c.vol_ratio!=null?(+c.vol_ratio).toFixed(2):null)}</td>`+
+         `<td class="num ${cls}">${fmt(c.chg5d!=null?(+c.chg5d).toFixed(2):null)}</td>`+
+         `<td class="num">${c.amount!=null?(c.amount/1e8).toFixed(2):"—"}</td></tr>`;
+    }
+    cb.innerHTML=h+"</tbody></table>";
+  }
+}
+
+let LAST_HIST=null, LAST_TH=50;
+async function loadHistory(){
+  const d=await jget("/api/history?days=250");
+  LAST_HIST=d.rows; LAST_TH=d.threshold;
+  drawChart(LAST_HIST, LAST_TH);
+}
+window.addEventListener("resize", ()=>{ if(LAST_HIST) drawChart(LAST_HIST, LAST_TH); });
+
+function drawChart(rows, th){
+  const cv=$("chart"), ctx=cv.getContext("2d");
+  // 高清适配：按实际显示尺寸 × 设备像素比设置画布
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = cv.parentElement.clientWidth || 1020;
+  const cssH = 250;
+  cv.width = cssW * dpr; cv.height = cssH * dpr;
+  cv.style.width = cssW + "px"; cv.style.height = cssH + "px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  const W=cssW, H=cssH, pl=44, pr=14, pt=16, pb=26;
+  ctx.clearRect(0,0,W,H);
+  if(!rows||!rows.length){ ctx.fillStyle="#8b96ad";ctx.font="13px sans-serif";
+    ctx.fillText("暂无历史数据",W/2-40,H/2); return; }
+  const vals=rows.map(r=>r.breadth);
+  const maxV=Math.max(th*1.4, ...vals, 10);
+  const n=rows.length;
+  const X=i=> pl + (W-pl-pr) * (n<=1?0.5:i/(n-1));
+  const Y=v=> H-pb - (H-pt-pb) * (v/maxV);
+
+  // 网格
+  ctx.strokeStyle="#eef1f7"; ctx.fillStyle="#8b96ad"; ctx.font="11px sans-serif"; ctx.lineWidth=1;
+  for(let k=0;k<=4;k++){
+    const v=maxV*k/4, y=Y(v);
+    ctx.beginPath();ctx.moveTo(pl,y);ctx.lineTo(W-pr,y);ctx.stroke();
+    ctx.fillText(Math.round(v), 6, y+4);
+  }
+  // 门槛线
+  const yth=Y(th);
+  ctx.strokeStyle="#f59e0b"; ctx.setLineDash([6,4]); ctx.lineWidth=1.6;
+  ctx.beginPath();ctx.moveTo(pl,yth);ctx.lineTo(W-pr,yth);ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle="#b45309"; ctx.font="11px sans-serif";
+  ctx.fillText("门槛 "+th, W-pr-52, yth-5);
+
+  // 柱
+  const bw=Math.max(1.2,(W-pl-pr)/n*0.66);
+  for(let i=0;i<n;i++){
+    const v=vals[i], x=X(i), y=Y(v);
+    ctx.fillStyle = v>=th ? "#d92b2b" : "#9db6ff";
+    ctx.fillRect(x-bw/2, y, bw, H-pb-y);
+  }
+  // 折线
+  ctx.strokeStyle="#2f6bff"; ctx.lineWidth=1.4; ctx.beginPath();
+  for(let i=0;i<n;i++){ const x=X(i),y=Y(vals[i]); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+  ctx.stroke();
+
+  // x 轴日期
+  ctx.fillStyle="#8b96ad"; ctx.font="11px sans-serif";
+  [0, Math.floor(n/2), n-1].forEach(i=>{
+    if(i<0||i>=n) return;
+    const t=rows[i].date.slice(2);
+    ctx.fillText(t, Math.min(Math.max(X(i)-16, pl), W-pr-34), H-8);
+  });
+}
+
+async function loadHoldings(){
+  const d=await jget("/api/holdings");
+  const box=$("holdBox");
+  if(!d.holdings.length){ box.innerHTML='<div class="empty">还没有持仓记录。</div>'; return; }
+  let h='<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>最新价</th>'+
+        '<th>盈亏%</th><th>止损线</th><th>止盈1/2</th><th>持有日</th><th>提示</th><th></th></tr></thead><tbody>';
+  for(const x of d.holdings){
+    const pnl = (x.pnl_pct==null||isNaN(x.pnl_pct)) ? "—"
+      : (x.pnl_pct>=0?'<span class="up">+':'<span class="down">')+(+x.pnl_pct).toFixed(2)+'%</span>';
+    let pills = (x.alerts||[]).map(a=>`<span class="alert-pill lv-${x.level}">${a}</span>`).join("");
+    if(!pills) pills='<span class="alert-pill lv-ok">正常持有</span>';
+    const actcls = x.level==="danger"?"lv-danger":(x.level==="win"?"lv-win":"lv-warn");
+    h+=`<tr><td>${x.code}</td><td>${x.name||""}</td><td>${x.buy_date}</td>`+
+       `<td class="num">${fmt(x.buy_price!=null?(+x.buy_price).toFixed(2):null)}</td>`+
+       `<td class="num">${fmt(x.last!=null?(+x.last).toFixed(2):null)}</td>`+
+       `<td class="num">${pnl}</td>`+
+       `<td class="num">${fmt(x.stop_price)}</td>`+
+       `<td class="num">${fmt(x.tp1_price)} / ${fmt(x.tp2_price)}</td>`+
+       `<td class="num">${x.days_held}</td>`+
+       `<td style="text-align:left"><span class="alert-pill ${actcls}">${x.action}</span>${pills?("<br>"+pills):""}</td>`+
+       `<td><button class="mini" style="cursor:pointer;color:#c81e1e;background:none;border:0"
+          onclick="delHolding(${x.id})">删除</button></td></tr>`;
+  }
+  box.innerHTML=h+"</tbody></table>";
+}
+
+async function addHolding(){
+  const code=$("fCode").value.trim(), date=$("fDate").value, price=$("fPrice").value;
+  if(!code||!date||!price){ showBanner("请填写代码、买入日期、买入价。","err"); return; }
+  // 前端先挡一道：买入价必须为正，否则止损/止盈线会全变 0
+  const p=parseFloat(price);
+  if(!(p>0)){ showBanner("买入价必须大于 0。","err"); return; }
+  if(!/^\d{5,6}$/.test(code)){ showBanner("股票代码应为 6 位数字，例如 300274。","err"); return; }
+  const r=await jpost("/api/holdings",{code,name:$("fName").value.trim(),buy_date:date,
+    buy_price:p,shares:parseInt($("fShares").value||"0")});
+  if(!r.ok){ showBanner(r.msg||"添加失败","err"); return; }
+  hideBanner(); $("fCode").value=$("fName").value=$("fPrice").value=$("fShares").value="";
+  loadHoldings();
+}
+async function delHolding(id){
+  if(!confirm("确定删除这条持仓记录？")) return;
+  await jpost("/api/holdings/"+id,null,"DELETE"); loadHoldings();
+}
+async function triggerUpdate(){
+  const b=$("btnUpdate"); b.disabled=true; b.textContent="更新中…";
+  showBanner("已开始更新数据，全市场约需 15–25 分钟，可关掉页面稍后再来。","info");
+  await jpost("/api/update");
+  const timer=setInterval(async()=>{
+    const s=await jget("/api/status");
+    if(!s.updating){ clearInterval(timer); b.disabled=false; b.textContent="更新数据";
+      hideBanner(); loadAll(); }
+  },5000);
+}
+
+/* ============ 任务中心 ============ */
+function esc(s){ return String(s==null?"":s)
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+const DAYN={'1':'一','2':'二','3':'三','4':'四','5':'五','6':'六','7':'日'};
+let TASK_POLL=null;
+
+function renderBlocks(blocks){
+  if(!blocks||!blocks.length) return '';
+  let h='';
+  for(const b of blocks){
+    h+='<div class="blk"><div class="blk-t">'+esc(b.title||'')+'</div>';
+    const rows=b.rows||[];
+    if(b.kind==='text'){
+      h+='<div class="blk-txt">'+esc(b.text||'').replace(/\n/g,'<br>')+'</div>';
+    }else if(b.kind==='kv'){
+      h+='<table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>';
+      for(const r of rows) h+='<tr><td>'+esc(r.k)+'</td><td class="num">'+esc(r.v)+'</td></tr>';
+      h+='</tbody></table>';
+    }else if(b.kind==='candidates'){
+      h+='<table><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
+         '<th>换手%</th><th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
+      for(const c of rows){
+        h+='<tr><td>'+esc(c.code)+'</td><td>'+esc(c.name||'')+'</td>'+
+           '<td class="num">'+(+c.close).toFixed(2)+'</td>'+
+           '<td class="num down">'+(c.bias!=null?(+c.bias).toFixed(2):'—')+'</td>'+
+           '<td class="num">'+(c.turnover_pct!=null?(+c.turnover_pct).toFixed(2):'—')+'</td>'+
+           '<td class="num">'+(c.vol_ratio!=null?(+c.vol_ratio).toFixed(2):'—')+'</td>'+
+           '<td class="num">'+(c.chg5d!=null?(+c.chg5d).toFixed(2):'—')+'</td>'+
+           '<td class="num">'+(c.amount!=null?(c.amount/1e8).toFixed(2):'—')+'</td></tr>';
+      }
+      h+='</tbody></table>';
+    }else if(b.kind==='holdings'){
+      h+='<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>最新价</th>'+
+         '<th>盈亏%</th><th>止损线</th><th>止盈1/2</th><th>持有日</th><th>提示</th></tr></thead><tbody>';
+      for(const x of rows){
+        const pnl = x.pnl_pct==null ? '—'
+          : (x.pnl_pct>=0?'<span class="up">+':'<span class="down">')+(+x.pnl_pct).toFixed(2)+'%</span>';
+        const lv = x.level==='danger'?'danger':(x.level==='win'?'win':(x.level==='warn'?'warn':'ok'));
+        const al=(x.alerts||[]).map(a=>'<span class="alert-pill lv-'+lv+'">'+esc(a)+'</span>').join('<br>');
+        h+='<tr><td>'+esc(x.code)+'</td><td>'+esc(x.name||'')+'</td><td>'+esc(x.buy_date)+'</td>'+
+           '<td class="num">'+fmt(x.buy_price!=null?(+x.buy_price).toFixed(2):null)+'</td>'+
+           '<td class="num">'+(x.last!=null?(+x.last).toFixed(2):'—')+'</td>'+
+           '<td class="num">'+pnl+'</td>'+
+           '<td class="num">'+(x.stop_price!=null?x.stop_price:'—')+'</td>'+
+           '<td class="num">'+((x.tp1_price!=null?x.tp1_price:'—')+' / '+(x.tp2_price!=null?x.tp2_price:'—'))+'</td>'+
+           '<td class="num">'+(x.days_held||0)+'</td>'+
+           '<td style="text-align:left"><span class="alert-pill lv-'+lv+'">'+esc(x.action||'')+'</span>'+
+           (al?'<br>'+al:'')+'</td></tr>';
+      }
+      h+='</tbody></table>';
+    }
+    h+='</div>';
+  }
+  return h;
+}
+
+function renderTasks(data){
+  const list=data.tasks||[], busy=list.some(t=>t.running);
+  let h='';
+  for(const t of list){
+    const running=t.running, last=t.last_run, days=(t.days||'1,2,3,4,5').split(',');
+    let dayBox='';
+    for(const k of ['1','2','3','4','5','6','7'])
+      dayBox+='<label><input type="checkbox" data-day="'+k+'" '+(days.includes(k)?'checked':'')+'>'+DAYN[k]+'</label>';
+
+    let lastTxt='<span class="mini">从未执行过</span>';
+    if(last){
+      const cls=last.status==='ok'?'st-ok':(last.status==='fail'?'st-fail':'st-running');
+      const nm=last.status==='ok'?'成功':(last.status==='fail'?'失败':'执行中');
+      lastTxt='<span class="mini">上次执行 '+
+        esc((last.finished_at||last.started_at||'').replace('T',' '))+
+        ' <span class="'+cls+'">['+nm+']</span> '+
+        (last.trigger_by==='schedule'?'（定时触发）':'（手动触发）')+'</span><br>'+
+        '<span>'+esc(last.title||'')+'</span>';
+    }
+    const pct = (t.progress&&t.progress.total>0)
+      ? Math.round(t.progress.done/t.progress.total*100) : (running?3:0);
+
+    h+='<div class="task '+(running?'running':'')+'" data-key="'+t.key+'">'+
+       '<div class="task-head"><div style="flex:1;min-width:260px">'+
+         '<div class="task-title"><span class="ico">'+t.icon+'</span>'+esc(t.name)+
+           ' <span class="chip '+(t.enabled?'on':'off')+'">'+
+           (t.enabled?('定时 '+esc(t.at_time)):'未开启定时')+'</span></div>'+
+         '<div class="task-desc">'+esc(t.desc)+'</div>'+
+         '<div class="task-more" id="more-'+t.key+'">'+esc(t.long_desc||'')+'</div>'+
+       '</div>'+
+       '<button class="btn sm ghost2" onclick="toggleMore(\''+t.key+'\')">说明</button></div>'+
+
+       '<div class="task-row">'+
+         '<button class="btn sm primary" onclick="runTask(\''+t.key+'\')" '+
+           ((running||busy)?'disabled':'')+'>▶ 立即执行</button>'+
+         '<label class="sw"><input type="checkbox" id="en-'+t.key+'" '+(t.enabled?'checked':'')+'> 定时执行</label>'+
+         '<input type="time" id="tm-'+t.key+'" value="'+esc(t.at_time)+'">'+
+         '<span class="mini">星期</span><div class="days">'+dayBox+'</div>'+
+         '<button class="btn sm ghost2" onclick="saveSchedule(\''+t.key+'\')">保存定时</button>'+
+       '</div>'+
+
+       '<div class="task-prog '+(running?'show':'')+'" id="prog-'+t.key+'">'+
+         '<div class="pbar"><i id="bar-'+t.key+'" style="width:'+pct+'%"></i></div>'+
+         '<div class="pmsg" id="pmsg-'+t.key+'">'+esc(running?(t.phase||'执行中'):'')+'…</div>'+
+       '</div>'+
+       '<div class="task-last">'+lastTxt+'</div>'+
+       '<details class="hist" ontoggle="if(this.open) loadHist(\''+t.key+'\')">'+
+         '<summary>查看历史执行记录</summary>'+
+         '<div class="hist-body" id="histb-'+t.key+'"></div></details>'+
+       '<div id="res-'+t.key+'"></div>'+
+    '</div>';
+  }
+  $("taskList").innerHTML=h;
+
+  // 异步补上「上次执行结果」
+  for(const t of list){
+    if(!t.last_run || t.last_run.status==='running') continue;
+    jget('/api/tasks/'+t.key+'/result/'+t.last_run.id).then(r=>{
+      const box=$('res-'+t.key); if(!box) return;
+      if(r.ok && r.result && r.result.blocks) box.innerHTML=renderBlocks(r.result.blocks);
+      else if(r.ok && r.run && r.run.detail)
+        box.innerHTML='<div class="blk"><div class="blk-txt">'+
+          esc(r.run.detail).replace(/\n/g,'<br>')+'</div></div>';
+    }).catch(()=>{});
+  }
+}
+
+async function loadTasks(){
+  try{
+    const d=await jget('/api/tasks');
+    renderTasks(d);
+    // ★ 如果发现已有任务在跑（可能是控制台窗口触发的），自动开始显示进度
+    if((d.tasks||[]).some(t=>t.running)) startTaskPoll();
+  }catch(e){}
+}
+function toggleMore(k){ const e=$('more-'+k); if(e) e.classList.toggle('show'); }
+
+async function loadHist(key){
+  const box=$('histb-'+key); if(!box||box.dataset.loaded) return;
+  try{
+    const d=await jget('/api/tasks/'+key+'/runs?limit=20');
+    if(!d.runs.length){ box.innerHTML='<span class="mini">还没有执行记录。</span>'; }
+    else{
+      box.innerHTML=d.runs.slice().reverse().map(r=>{
+        const nm=r.status==='ok'?'成功':(r.status==='fail'?'失败':'执行中');
+        const cls=r.status==='ok'?'st-ok':(r.status==='fail'?'st-fail':'st-running');
+        return '<div class="hist-item"><b>'+esc((r.started_at||'').replace('T',' '))+'</b> '+
+               '<span class="'+cls+'">['+nm+']</span> '+
+               (r.trigger_by==='schedule'?'定时':'手动')+'<br>'+esc(r.title||'')+'</div>';
+      }).join('');
+    }
+    box.dataset.loaded='1';
+  }catch(e){ box.innerHTML='<span class="mini">加载失败</span>'; }
+}
+
+async function runTask(key){
+  const r=await jpost('/api/tasks/'+key+'/run');
+  showBanner(r.msg||'', r.ok?'info':'err');
+  if(r.ok){ await loadTasks(); startTaskPoll(); }
+}
+
+function startTaskPoll(){
+  if(TASK_POLL) return;
+  showBanner("任务已在后台执行。盘后任务要下载全市场数据，约需 20~25 分钟，可以放着不管。","info");
+  TASK_POLL=setInterval(async()=>{
+    let d;
+    try{ d=await jget('/api/tasks'); }catch(e){ return; }
+    // 只更新进度条，避免整块重绘打断操作
+    for(const t of d.tasks){
+      const bar=$('bar-'+t.key), msg=$('pmsg-'+t.key), box=$('prog-'+t.key);
+      if(box) box.classList.toggle('show', !!t.running);
+      if(bar && t.running){
+        bar.style.width=((t.progress&&t.progress.total>0)
+          ? Math.round(t.progress.done/t.progress.total*100) : 5)+'%';
+      }
+      if(msg && t.running) msg.textContent=(t.phase||'执行中')+' · '+(t.progress&&t.progress.msg||'')+'…';
+    }
+    if(!d.tasks.some(t=>t.running)){
+      clearInterval(TASK_POLL); TASK_POLL=null;
+      hideBanner();
+      await loadTasks(); await loadAll();
+    }
+  },3000);
+}
+
+async function saveSchedule(key){
+  const enabled=$('en-'+key).checked;
+  const at=$('tm-'+key).value||'09:10';
+  const days=[...document.querySelectorAll('[data-key="'+key+'"] input[data-day]')]
+    .filter(x=>x.checked).map(x=>x.dataset.day).join(',');
+  if(enabled && !days){ showBanner("开启定时时，请至少勾选一个星期。","err"); return; }
+  const r=await jpost('/api/tasks/'+key+'/schedule',{enabled:enabled,at_time:at,days:days});
+  showBanner(r.msg||'', r.ok?'info':'err');
+  await loadTasks();
+}
+
+async function loadAll(){
+  // ★ 每个加载器各自 try/catch：某一个接口失败（例如持仓表出错）不应该
+  //   连带把后面的任务中心、曲线一起卡住不更新。
+  let okAny=false;
+  for(const f of [loadStatus,loadToday,loadHistory,loadHoldings,loadTasks]){
+    try{ await f(); okAny=true; }catch(e){}
+  }
+  return okAny;
+}
+
+$("btnUpdate").onclick=triggerUpdate;
+$("btnAdd").onclick=addHolding;
+// ★ 用本地时间生成"今天"，不能用 toISOString()（那是 UTC，
+//   北京时间早上 8 点前会算出昨天的日期）
+(function(){
+  const d=new Date();
+  $("fDate").value=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+
+                   String(d.getDate()).padStart(2,'0');
+})();
+
+// 首次加载：若后端尚未就绪，每 2 秒自动重试（最多 60 次 ≈ 2 分钟）
+(async function boot(){
+  let up=false;
+  for(let i=0;i<60;i++){
+    try{ await jget("/api/status"); up=true; break; }catch(e){}
+    showBanner("正在等待后端服务启动…（请稍候）","info");
+    await new Promise(r=>setTimeout(r,2000));
+  }
+  if(up){ hideBanner(); await loadAll(); }
+  else { showBanner("连不上后端服务。请确认「控制台」里工具网站是运行中，然后刷新本页。","err"); }
+  setInterval(loadStatus, 60000);
+})();
+</script>
+</body>
+</html>

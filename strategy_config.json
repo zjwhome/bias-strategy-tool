@@ -1,0 +1,202 @@
+{
+  "strategy": {
+    "name": "A股乖离率超跌反弹策略",
+    "version": "2.1",
+    "type": "mean_reversion",
+    "market": "hs",
+    "hold_days_target": [2, 10],
+    "updated": "2026-09-15",
+    "backtest_basis": {
+      "period": "2021-01 ~ 2026-08",
+      "universe_size": 4993,
+      "kline_count": 6310000,
+      "report": "回测报告-全量第二轮.md"
+    }
+  },
+
+  "universe": {
+    "exclude_st": true,
+    "exclude_delisting": true,
+    "exclude_suspended": true,
+    "min_listed_days": 60,
+    "min_total_mv_yuan": 5000000000,
+    "min_turnover_rate_pct": 1
+  },
+
+  "regime_gate": {
+    "enabled": true,
+    "note": "★ v2.0 核心升级：市场层择时总开关。此层不过关，后面全部不看。",
+    "metric": "signal_breadth",
+    "metric_definition": "当日全市场满足 [BIAS_24 < -15 且 当日成交量 >= 5日均量*1.5 且 Chg5D < 0] 的股票只数",
+    "presets": {
+      "main": { "threshold": 50, "six_year_days": 22, "annual_opportunities": 3.7, "backtest_win_rate_pct": 85.6, "backtest_avg_ret_pct": 4.37, "backtest_pl_ratio": 4.81 },
+      "loose": { "threshold": 20, "six_year_days": 46, "annual_opportunities": 7.7, "backtest_win_rate_pct": 82.1, "backtest_avg_ret_pct": 3.78, "backtest_pl_ratio": 3.65 },
+      "aggressive": { "threshold": 100, "six_year_days": 15, "annual_opportunities": 2.5, "backtest_win_rate_pct": 87.8, "backtest_avg_ret_pct": 4.84, "backtest_pl_ratio": 6.48 }
+    },
+    "active_preset": "main",
+    "breadth_tiers": [
+      { "range": [1, 5], "meaning": "个股利空", "I_avg_ret_pct": -1.01, "I_win_rate_pct": 49.9 },
+      { "range": [6, 20], "meaning": "小范围调整", "I_avg_ret_pct": -0.21, "I_win_rate_pct": 56.4 },
+      { "range": [21, 50], "meaning": "板块级调整", "I_avg_ret_pct": 0.17, "I_win_rate_pct": 61.2 },
+      { "range": [51, 100], "meaning": "市场级调整", "I_avg_ret_pct": 2.32, "I_win_rate_pct": 77.3 },
+      { "range": [101, 300], "meaning": "系统性下跌", "I_avg_ret_pct": 3.04, "I_win_rate_pct": 77.9 },
+      { "range": [301, null], "meaning": "全市场恐慌", "I_avg_ret_pct": 6.36, "I_win_rate_pct": 96.1 }
+    ]
+  },
+
+  "signal": {
+    "bias_field": "BIAS_24",
+    "bias_period": 24,
+    "bias_threshold_default_pct": -15,
+    "bias_threshold_backtest_note": "回测证明 -12 / -14 / -15 三档样本数与收益完全相同（恐慌日绝大多数股票 BIAS 已 < -15），收紧至 -18 以下收益微增但样本锐减，故定 -15",
+    "require_positive_pe": true,
+    "require_chg5d_negative": true,
+    "volume_ratio_min": 1.5,
+    "volume_surge_enabled": true,
+    "volume_surge_hard_filter": true
+  },
+
+  "sector_thresholds": {
+    "enabled": false,
+    "note": "可选优化项。全量回测显示择时生效后分板块阈值边际价值下降，默认统一用 -15 即可跑通。",
+    "A_low_volatility": {
+      "threshold_pct": -6,
+      "industries": ["银行", "公用事业", "交通运输", "石油石化"]
+    },
+    "B_mid_low_volatility": {
+      "threshold_pct": -10,
+      "industries": ["食品饮料", "家用电器", "商贸零售", "农林牧渔", "煤炭", "钢铁", "建筑材料", "房地产"]
+    },
+    "C_mid_volatility": {
+      "threshold_pct": -13,
+      "industries": ["医药生物", "基础化工", "机械设备", "汽车", "有色金属", "轻工制造", "纺织服饰", "建筑装饰", "环保", "社会服务"]
+    },
+    "D_high_volatility": {
+      "threshold_pct": -18,
+      "industries": ["电子", "计算机", "电力设备", "国防军工", "通信", "传媒", "美容护理", "综合", "非银金融"]
+    }
+  },
+
+  "scoring": {
+    "bias_extreme": { "weight": 2, "rule": "BIAS_24 处于近60个交易日最低10%分位" },
+    "sector_resonance": { "weight": 2, "rule": "所属行业当日涨跌幅 <= 全市场中位数" },
+    "capital_turn": { "weight": 2, "rule": "主力净流入转正或流出收窄50%以上" },
+    "volume_shrink_stabilize": { "weight": 1, "rule": "成交量 <= 前日*0.7 且跌幅收窄" },
+    "index_panic": { "weight": 1, "rule": "沪深300当日跌幅 >= 1.5%" },
+    "min_score_to_buy": 3,
+    "min_score_to_focus": 5,
+    "note": "v1.0 的 volume_surge 已上移为硬门槛（signal.volume_surge_enabled），不再作为加分项"
+  },
+
+  "position": {
+    "max_single_position_pct": 5,
+    "first_entry_pct": 2.5,
+    "add_on_pct": 2.5,
+    "max_add_times": 1,
+    "add_trigger_drop_pct": -5,
+    "max_holdings": 10,
+    "max_per_industry": 3,
+    "max_industry_position_pct": 15,
+    "max_daily_signals": 10,
+    "daily_signal_limit_note": "广度>100 时信号会暴增，必须限流；超出按 得分 + 乖离率 排序取前 10"
+  },
+
+  "market_regime": {
+    "index": "sh000300",
+    "ma_period": 60,
+    "strong": { "max_total_position_pct": 80, "rule": "沪深300收盘价 > MA60" },
+    "neutral": { "max_total_position_pct": 50, "rule": "沪深300在MA60上下3%内" },
+    "weak": { "max_total_position_pct": 30, "rule": "沪深300收盘价 < MA60" },
+    "extreme": { "max_total_position_pct": 20, "rule": "沪深300 BIAS_24 < -8" },
+    "conflict_note": "极端行情往往正是广度最大的恐慌日。处理原则：广度择时决定『是否进场』，大盘仓位上限决定『进多少』；极端行情下即便广度达标也只用20%仓位试探。"
+  },
+
+  "exit_rules": [
+    { "priority": 0, "name": "硬止损", "rule": "收盘价 < 买入价 * 0.94 (即 -6%)", "action": "次日开盘全部卖出", "note": "基准为 T+1 实际买入价（开盘价）；收盘价确认，不用盘中价" },
+    { "priority": 1, "name": "分层止盈-第一档", "rule": "盘中价 >= 买入价 * 1.06 (+6%)", "action": "卖出 50%" },
+    { "priority": 2, "name": "分层止盈-第二档", "rule": "盘中价 >= 买入价 * 1.10 (+10%)", "action": "清仓剩余" },
+    { "priority": 3, "name": "移动止盈", "rule": "浮盈曾达 +5% 后，从最高点回撤 3%", "action": "清仓剩余" },
+    { "priority": 4, "name": "时间止损", "rule": "持有满 10 个交易日仍未触发以上规则", "action": "到期市价全部卖出" }
+  ],
+
+  "hard_stop_loss_pct": -6,
+  "hard_stop_basis": "T+1 entry open price (close-price confirmed)",
+  "take_profit_tiers_pct": [6, 10],
+  "take_profit_tier_sizes": [0.5, 0.5],
+  "trailing_stop": { "trigger_pct": 5, "drawdown_pct": 3 },
+  "max_hold_days": 10,
+
+  "suspension_guard": {
+    "enabled": true,
+    "rule": "持有窗口内相邻交易日间隔 > 12 个自然日 → 判定停牌，整笔剔除",
+    "note": "回测防污染；实盘中停牌股应直接排除，复牌一字板会严重扭曲统计"
+  },
+
+  "cost_assumption": {
+    "commission_rate": 0.00025,
+    "stamp_tax_sell": 0.0005,
+    "slippage_one_side": 0.0015,
+    "round_trip_total_pct": 0.4
+  },
+
+  "kill_switch": {
+    "win_rate_below_pct": 40,
+    "win_rate_window_trades": 20,
+    "weekly_loss_pct": -5,
+    "consecutive_hard_stops": 3,
+    "breadth_regime_invalid": "广度阈值连续多次『达标却亏损』→ 暂停并重新校准门槛"
+  },
+
+  "expressions": {
+    "breadth_gate": "intersect([BIAS_24 < -15, Chg5D < 0, VolumeRatio > 1.5])",
+    "breadth_gate_note": "第一步：统计返回条数 = 当日信号广度；广度 >= 50 才继续下一步",
+    "basic": "intersect([BIAS_24 < -15, TotalMV > 5000000000, PE_TTM > 0, TurnoverRate > 1, Chg5D < 0, VolumeRatio > 1.5])",
+    "strict": "intersect([BIAS_24 < -20, TotalMV > 5000000000, PE_TTM > 0, TurnoverRate > 1.5, Chg5D < 0, VolumeRatio > 1.5])",
+    "orderby": "BIAS_24",
+    "order": "asc",
+    "date_logic": "每日收盘后先算广度判断是否进场，达标则取当日信号，次日开盘执行"
+  },
+
+  "implementation_notes": [
+    "★ v2.0 核心：每日必须先计算『信号广度』，未达标日不产生任何操作。这是六年回测中最强的择时变量。",
+    "总市值 TotalMV 在筛选表达式中单位是【元】（> 5000000000 表示 50亿），但在返回结果中展示单位是【亿元】，切勿混淆。",
+    "止损基准是 T+1 实际买入价（开盘价），不是信号日最低价（v1.0 的错误做法）。",
+    "止损用收盘价确认，不用盘中价——盘中 -3% 止损率高达 54.6%，收盘 -6% 仅 21.8%。",
+    "连接器的 universe（板块限定）参数经实测不稳定，分板块阈值建议用行业成分股清单交叉匹配实现。",
+    "信号数据在每日收盘后更新，定时任务应设置在 15:30 之后。",
+    "多条件必须用 intersect([...])，不支持 & / && / AND。",
+    "收益高度依赖系统性崩盘事件：剔除 2025-04/2024-02/2022-04 三大事件月后，均收益从 +4.37% 降到 +0.33%（胜率仍 61.5%）。不要用 +4.37% 做心理预期。"
+  ],
+
+  "live_implementation": {
+    "note": "★ v2.1 新增：用已授权的腾讯自选股连接器零成本执行的实盘方案（已实测验证）",
+    "breadth_query": "intersect([BIAS_24 < -15, Chg5D < 0, VolumeRatio > 1.5, TotalMV > 5000000000, TurnoverRate > 1])",
+    "breadth_source": "条件选股接口返回的 totalStocks 字段 = 当日信号广度",
+    "breadth_query_note": "广度查询只取 totalStocks，不要加 PE_TTM 条件、不要排序限制（全量计数）",
+    "pick_query": "intersect([BIAS_24 < -15, Chg5D < 0, VolumeRatio > 1.5, TotalMV > 5000000000, TurnoverRate > 1, PE_TTM > 0])",
+    "pick_orderby": "BIAS_24",
+    "pick_order": "asc",
+    "pick_limit": 10,
+    "schedule": "每交易日 15:30 之后执行广度查询",
+    "calibration": {
+      "note": "实盘口径（市值>50亿+换手>1%）与回测口径（成交额>8000万+非ST）的实测对照；平均倍数≈1.08，确认门槛 50 可直接沿用",
+      "samples": [
+        { "date": "2025-04-07", "backtest_breadth": 758, "live_breadth": 460, "event": "美国对等关税冲击" },
+        { "date": "2024-02-05", "backtest_breadth": 465, "live_breadth": 522, "event": "小微盘流动性危机" },
+        { "date": "2024-01-31", "backtest_breadth": 126, "live_breadth": 129, "event": "雪球敲入" },
+        { "date": "2026-07-21", "backtest_breadth": 132, "live_breadth": 205, "event": "年内调整" }
+      ],
+      "mean_ratio": 1.08
+    },
+    "live_tiers": [
+      { "range": [0, 20], "state": "风平浪静", "action": "空仓等待" },
+      { "range": [21, 50], "state": "局部调整", "action": "只记录，不操作" },
+      { "range": [51, 150], "state": "市场级恐慌", "action": "半仓建仓" },
+      { "range": [151, 400], "state": "系统性崩盘", "action": "重点出手" },
+      { "range": [401, null], "state": "全市场踩踏", "action": "罕见机会，重点出手" }
+    ],
+    "companion_docs": ["傻瓜版-超跌抄底策略.md", "每日广度过检-操作卡.md"]
+  },
+
+  "disclaimer": "本配置仅用于客观数据筛选，不构成投资建议。投资有风险，决策需谨慎。"
+}
