@@ -68,6 +68,47 @@ STATE: dict[str, dict] = {
 _LOCK = threading.Lock()
 
 
+# ------------------------------------------------------------------ 出场参数（读配置）
+# ★ 修复：以前 0.94 / 1.06 / 1.10 / 1.05 / 0.97 / 10 这些数字是**直接写死**在代码里的，
+#   导致用户按说明书改了 strategy_config.json 里的止损/止盈/持有上限后，
+#   「持仓体检」和网页上的止损线、止盈线**根本不跟着变**（改了个寂寞）。
+#   现在统一从配置读，改完刷新页面即生效，无需重启。
+_EXIT_DEFAULTS = dict(
+    hard_stop_loss_pct=-6.0,             # 收盘价跌破买入价 -6% → 卖出
+    take_profit_tiers_pct=[6.0, 10.0],   # 分档止盈：+6% 卖一半 / +10% 清仓
+    trailing_trigger_pct=5.0,            # 浮盈曾达 +5%
+    trailing_drawdown_pct=3.0,           # 之后从最高点回撤 3% → 清仓
+    max_hold_days=10,                    # 最长持有交易日
+    max_daily_signals=10,                # 单日最多出手几只
+)
+
+
+def exit_config() -> dict:
+    """出场规则参数。每次调用都重读配置文件，所以改完立刻生效。"""
+    c = dict(_EXIT_DEFAULTS)
+    try:
+        with open(core.CONFIG_JSON, "r", encoding="utf-8") as f:
+            j = json.load(f)
+        if j.get("hard_stop_loss_pct") is not None:
+            c["hard_stop_loss_pct"] = float(j["hard_stop_loss_pct"])
+        tp = j.get("take_profit_tiers_pct")
+        if isinstance(tp, (list, tuple)) and len(tp) >= 2:
+            c["take_profit_tiers_pct"] = [float(tp[0]), float(tp[1])]
+        ts = j.get("trailing_stop") or {}
+        if ts.get("trigger_pct") is not None:
+            c["trailing_trigger_pct"] = float(ts["trigger_pct"])
+        if ts.get("drawdown_pct") is not None:
+            c["trailing_drawdown_pct"] = float(ts["drawdown_pct"])
+        if j.get("max_hold_days"):
+            c["max_hold_days"] = int(j["max_hold_days"])
+        mds = (j.get("position") or {}).get("max_daily_signals")
+        if mds:
+            c["max_daily_signals"] = int(mds)
+    except Exception as e:
+        print(f"[exit_config] 读取失败，使用默认值：{e}")
+    return c
+
+
 # ------------------------------------------------------------------ 持仓体检
 def _holding_days(code: str, buy_date: str) -> int:
     """买入至今经过的交易天数（按该股本地日线计数）"""
@@ -91,6 +132,8 @@ def evaluate_holding(h: dict, price: float | None = None,
     """
     out = dict(h)
     buy = float(h["buy_price"] or 0)
+    ec = exit_config()
+    out["max_hold_days"] = ec["max_hold_days"]
 
     if price is None:
         q = core.latest_quote(h["code"])
@@ -109,9 +152,16 @@ def evaluate_holding(h: dict, price: float | None = None,
     out["action"] = "持有"
     out["level"] = "ok"
 
-    stop = float(h.get("stop_price") or buy * 0.94)
-    tp1 = float(h.get("tp1_price") or buy * 1.06)
-    tp2 = float(h.get("tp2_price") or buy * 1.10)
+    # ★ 阈值全部来自 strategy_config.json（改配置立即生效）
+    stop_mult = 1 + ec["hard_stop_loss_pct"] / 100.0
+    tp1_mult = 1 + ec["take_profit_tiers_pct"][0] / 100.0
+    tp2_mult = 1 + ec["take_profit_tiers_pct"][1] / 100.0
+    trail_trigger = 1 + ec["trailing_trigger_pct"] / 100.0
+    trail_dd = 1 - ec["trailing_drawdown_pct"] / 100.0
+
+    stop = float(h.get("stop_price") or buy * stop_mult)
+    tp1 = float(h.get("tp1_price") or buy * tp1_mult)
+    tp2 = float(h.get("tp2_price") or buy * tp2_mult)
     peak = max(float(h.get("peak_price") or buy), float(price))
 
     # 刷新历史最高价（让「移动止盈」能跨天工作）
@@ -125,31 +175,34 @@ def evaluate_holding(h: dict, price: float | None = None,
                tp2_price=round(tp2, 3), peak_price=round(peak, 3))
 
     tag = "预警" if intraday else "确认"
+    stop_pct = ec["hard_stop_loss_pct"]
+    tp1_pct, tp2_pct = ec["take_profit_tiers_pct"]
 
     if price < stop:
         out["action"] = "★ 卖出（跌破止损线）"
         out["level"] = "danger"
-        out["alerts"].append(f"{tag}：{price:.2f} < 止损线 {stop:.2f}（-6%）")
-    elif peak >= buy * 1.05 and price <= peak * 0.97:
+        out["alerts"].append(f"{tag}：{price:.2f} < 止损线 {stop:.2f}（{stop_pct:+.0f}%）")
+    elif peak >= buy * trail_trigger and price <= peak * trail_dd:
         out["action"] = "★ 清仓（移动止盈回撤）"
         out["level"] = "danger"
-        out["alerts"].append(f"{tag}：最高 {peak:.2f} 回撤到 {price:.2f}（≥3%）")
+        out["alerts"].append(
+            f"{tag}：最高 {peak:.2f} 回撤到 {price:.2f}（≥{ec['trailing_drawdown_pct']:.0f}%）")
     elif price >= tp2:
-        out["action"] = "★ 全部清仓（+10%）"
+        out["action"] = f"★ 全部清仓（+{tp2_pct:.0f}%）"
         out["level"] = "win"
-        out["alerts"].append(f"{tag}：已达 +10% 止盈线 {tp2:.2f}")
+        out["alerts"].append(f"{tag}：已达 +{tp2_pct:.0f}% 止盈线 {tp2:.2f}")
     elif price >= tp1:
-        out["action"] = "卖出一半（+6%）"
+        out["action"] = f"卖出一半（+{tp1_pct:.0f}%）"
         out["level"] = "win"
-        out["alerts"].append(f"{tag}：已达 +6% 止盈线 {tp1:.2f}")
-    if out["days_held"] >= 10:
+        out["alerts"].append(f"{tag}：已达 +{tp1_pct:.0f}% 止盈线 {tp1:.2f}")
+    if out["days_held"] >= ec["max_hold_days"]:
         # ★ 到期只是「兜底卖出」条件，绝不能覆盖更紧急的止损 / 移动止盈 / 止盈信号。
         #   原实现无条件覆盖 action，会出现「明明已跌破止损线，却显示到期清仓」的误导。
         if out["action"] == "持有":
-            out["action"] = "★ 到期清仓（满 10 个交易日）"
+            out["action"] = f"★ 到期清仓（满 {ec['max_hold_days']} 个交易日）"
         if out["level"] == "ok":
             out["level"] = "warn"
-        out["alerts"].append(f"已持有 {out['days_held']} 个交易日（上限 10 日）")
+        out["alerts"].append(f"已持有 {out['days_held']} 个交易日（上限 {ec['max_hold_days']} 日）")
 
     # 行情非最新提示（盘中不提示，因为盘中本来就是当日实时价）
     if (not intraday) and latest_market_date and str(quote_date) < str(latest_market_date):
@@ -242,12 +295,15 @@ def run_premarket(log=None) -> dict:
             blocks.append(dict(
                 title=f"今日开盘买入清单（{d['date']} 选出的候选股，共 {len(cands)} 只）",
                 kind="candidates", rows=cands))
+            ec_ = exit_config()
             blocks.append(dict(
                 title="怎么买",
                 kind="text",
                 text=("· 开盘后分 2~3 批买入，不要一次全仓\n"
                       f"· 最多 {len(cands)} 只，资金平均分配\n"
-                      "· 买入价即你的成本，止损线 = 买入价 × 0.94")))
+                      f"· 买入价即你的成本，止损线 = 买入价 × "
+                      f"{1 + ec_['hard_stop_loss_pct'] / 100:.2f}"
+                      f"（{ec_['hard_stop_loss_pct']:+.0f}%）")))
         else:
             blocks.append(dict(title="今日买入清单", kind="text",
                                text="昨日广度达标但未选出个股（极少见）。"))
@@ -285,9 +341,12 @@ def run_intraday(log=None) -> dict:
     hs = db.list_holdings("holding")
 
     if not hs:
+        ec_ = exit_config()
+        t1, t2 = ec_["take_profit_tiers_pct"]
         msg = ("当前没有持仓，盘中无需盯盘。\n\n"
                "盘中任务的用途：当你持有股票时，实时监控它们是否触及"
-               "止盈（+6% / +10%）、止损（-6%）或移动止盈（回撤 3%）。")
+               f"止盈（+{t1:.0f}% / +{t2:.0f}%）、止损（{ec_['hard_stop_loss_pct']:+.0f}%）"
+               f"或移动止盈（回撤 {ec_['trailing_drawdown_pct']:.0f}%）。")
         log("[盘中] 无持仓，跳过")
         return dict(headline="当前没有持仓，盘中无需盯盘。", level="neutral",
                     blocks=[dict(title="说明", kind="text", text=msg)],
@@ -332,11 +391,13 @@ def run_intraday(log=None) -> dict:
                            kind="text",
                            text=("盘中价格来自腾讯/新浪实时快照接口。\n"
                                  "注意：本地缓存的日线数据要等收盘后跑「盘后任务」才会更新。")))
+    ec_ = exit_config()
+    t1, t2 = ec_["take_profit_tiers_pct"]
     blocks.append(dict(
         title="重要说明", kind="text",
         text=("· 本策略的止损/止盈**以收盘价为准**，盘中只作预警，不要因为盘中插针就慌。\n"
               "· 止损执行时点 = 收盘确认跌破后，**次日开盘卖出**。\n"
-              "· 若盘中已到 +6% / +10%，可以考虑提前落袋，但不是必须。")))
+              f"· 若盘中已到 +{t1:.0f}% / +{t2:.0f}%，可以考虑提前落袋，但不是必须。")))
     if fails:
         blocks.append(dict(title="行情获取失败", kind="text",
                            text="以下股票未取到实时行情，已回退用最近收盘价：" + "、".join(fails)))
@@ -372,15 +433,19 @@ def run_postmarket(log=None, limit: int = 0, no_fetch: bool = False) -> dict:
     if trig:
         headline = f"{res['date']} 广度 {res['breadth']} 达标 → 明天可以出手！"
         level = "ok"
+        ec_ = exit_config()
+        t1, t2 = ec_["take_profit_tiers_pct"]
         blocks.append(dict(
             title=f"★ 明日买入候选股（{len(res['candidates'])} 只）",
             kind="candidates", rows=res["candidates"]))
         blocks.append(dict(
             title="明日怎么操作", kind="text",
             text=("1. 明天开盘后分 2~3 批买入这些股票，资金平均分配\n"
-                  "2. 最多 10 只，单只不超过总资金的 1/10~1/5\n"
+                  f"2. 最多 {ec_.get('max_daily_signals', 10)} 只，单只不超过总资金的 1/10~1/5\n"
                   "3. 买入后立刻到工具站「我的持仓」登记，页面会自动帮你盯止损止盈\n"
-                  "4. 止损线 = 买入价 × 0.94；止盈 +6% 卖一半、+10% 清仓；最长持有 10 个交易日")))
+                  f"4. 止损线 = 买入价 × {1 + ec_['hard_stop_loss_pct'] / 100:.2f}"
+                  f"（{ec_['hard_stop_loss_pct']:+.0f}%）；止盈 +{t1:.0f}% 卖一半、"
+                  f"+{t2:.0f}% 清仓；最长持有 {ec_['max_hold_days']} 个交易日")))
     else:
         headline = f"{res['date']} 广度 {res['breadth']} 未达标 → 明天不动手。"
         level = "neutral"

@@ -113,7 +113,15 @@ def api_history():
 def api_holdings():
     d = db.get_daily()
     hs = tasks.evaluate_holdings(latest_market_date=d["date"] if d else "")
-    return jsonify(dict(ok=True, holdings=hs))
+    # 出场参数一并返回给前端：max_hold_days 用于标记「已超期」，
+    # exit 用于让卡片标题里的「止损 -6% · 止盈 +6%/+10%」跟着配置走，不再写死。
+    ec = tasks.exit_config()
+    return jsonify(dict(ok=True, holdings=hs,
+                        max_hold_days=ec["max_hold_days"],
+                        exit=dict(stop_pct=ec["hard_stop_loss_pct"],
+                                  tp1_pct=ec["take_profit_tiers_pct"][0],
+                                  tp2_pct=ec["take_profit_tiers_pct"][1],
+                                  max_hold_days=ec["max_hold_days"])))
 
 
 @app.post("/api/holdings")
@@ -337,11 +345,18 @@ def _sleep(sec: int):
 # ------------------------------------------------------------------ 入口
 def main():
     db.init_db()
-    host, port = "127.0.0.1", 8000
+    # ★ 端口可用环境变量 BIA_PORT 覆盖（默认 8000）。端口被占用时改这个即可，
+    #   control.py 读的是同一个变量，两边不会脱节。
+    host = os.environ.get("BIA_HOST", "127.0.0.1")
+    try:
+        port = int(os.environ.get("BIA_PORT") or 8000)
+    except ValueError:
+        port = 8000
     print("=" * 68)
     print("  乖离率策略 · 本地工具站已启动")
     print(f"  请在浏览器打开：  http://{host}:{port}")
     print(f"  门槛：广度 ≥ {core.CFG['breadth_threshold']}　|　BIAS ≤ {core.CFG['bias_threshold']}%")
+    print(f"  数据库：{db.DB_PATH}")
     print("  提示：三个任务默认都是「不定时」，需要在网页上手动开启。")
     print("  按 Ctrl+C 关闭")
     print("=" * 68, flush=True)

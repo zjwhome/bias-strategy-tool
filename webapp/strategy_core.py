@@ -45,7 +45,10 @@ DATA_DIR = os.path.join(BASE, "data_long")
 UNIVERSE_CSV = os.path.join(WEBAPP, "universe.csv")
 # ★ 回测口径清单（5017 只，含 code/name）——必须优先使用，保证「广度 50」与回测语义一致
 BACKTEST_UNIVERSE = os.path.join(DATA_DIR, "_universe.csv")
-CONFIG_JSON = os.path.join(BASE, "strategy_config.json")
+# ★ 参数配置文件路径。默认读项目根的 strategy_config.json；
+#   可用环境变量 BIA_CONFIG_PATH 指向另一份配置——便于「拿一份改了阈值的配置做测试」
+#   而不碰真实配置（与 BIA_DB_PATH 同一套隔离测试思路）。
+CONFIG_JSON = os.environ.get("BIA_CONFIG_PATH") or os.path.join(BASE, "strategy_config.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(WEBAPP, exist_ok=True)

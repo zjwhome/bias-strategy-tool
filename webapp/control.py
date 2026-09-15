@@ -26,8 +26,12 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
-PORT = 8000
-HOST = "127.0.0.1"
+# ★ 与 server.py 保持一致：可用环境变量 BIA_PORT / BIA_HOST 覆盖（默认 8000）
+HOST = os.environ.get("BIA_HOST", "127.0.0.1")
+try:
+    PORT = int(os.environ.get("BIA_PORT") or 8000)
+except ValueError:
+    PORT = 8000
 URL = f"http://{HOST}:{PORT}"
 PY = sys.executable
 IS_WIN = os.name == "nt"

@@ -12,7 +12,10 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
+# 数据库路径：默认 webapp/data.db。
+# ★ 可用环境变量 BIA_DB_PATH 覆盖——便于「用一个独立数据库做测试」而不污染真实持仓。
+DB_PATH = os.environ.get("BIA_DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily (

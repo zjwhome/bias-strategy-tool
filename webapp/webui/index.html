@@ -64,6 +64,25 @@ tbody tr:hover{background:#f8fAff}
 td.num{font-variant-numeric:tabular-nums}
 .up{color:var(--up);font-weight:600}
 .down{color:var(--down);font-weight:600}
+.mut{color:var(--muted)}
+
+/* ---------- 持仓表（固定列宽 + 可横向滚动，避免内容溢出被裁掉） ---------- */
+/* 原实现：11 列的表格用的是「自动列宽 + 全部 nowrap」，
+   列宽由最长的内容（提示文字）撑开，总宽超过卡片后文字被直接切掉（600519 那行就丢了「（-6%）」），
+   而且表头「提示」是右对齐、内容却是左对齐，看起来像错位。以下全部修掉。 */
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table.cand{min-width:720px}
+table.hold{table-layout:fixed;min-width:960px}
+table.hold th,table.hold td{padding:8px;vertical-align:middle}
+table.hold th.l,table.hold td.l{text-align:left}
+table.hold td.nm{overflow:hidden;text-overflow:ellipsis}
+table.hold td.tip{white-space:normal;text-align:left;line-height:1.7;word-break:break-word}
+table.hold td.tip .alert-pill{margin-bottom:2px}
+table.hold .days-over{color:#b45309;font-weight:700}
+table.hold .ovt{display:inline-block;margin-left:4px;font-size:10.5px;font-weight:700;
+  color:#b45309;background:#fff7e6;border-radius:4px;padding:0 4px}
+.del{border:0;background:none;color:#c81e1e;font-size:12px;cursor:pointer;padding:3px 6px;border-radius:6px}
+.del:hover{background:#ffecec;color:#a01414}
 
 /* ---------- 其他 ---------- */
 .empty{color:var(--muted);text-align:center;padding:26px 0;font-size:13.5px}
@@ -212,7 +231,7 @@ details.hist[open] summary:before{content:"▾ ";}
 
   <!-- 我的持仓 -->
   <div class="card">
-    <h2>我的持仓 <span class="tag">止损 -6% · 止盈 +6%/+10% · 最长 10 日</span></h2>
+    <h2>我的持仓 <span class="tag" id="tagHold">止损 -6% · 止盈 +6%/+10% · 最长 10 日</span></h2>
     <div class="hform">
       <div><label>股票代码</label><input id="fCode" placeholder="如 300274"></div>
       <div><label>名称（可空）</label><input id="fName" placeholder="自动填"></div>
@@ -283,7 +302,8 @@ async function loadToday(){
       ? '<div class="empty">达标但无符合条件的个股（极少见）。</div>'
       : '<div class="empty">广度未达标，今天不用看个股。</div>';
   }else{
-    let h='<table><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
+    // 用 .tbl-scroll 包一层：窄屏时可横向滚动，不会把文字挤掉
+    let h='<div class="tbl-scroll"><table class="cand"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
           '<th>换手%</th><th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
     for(const c of t.candidates){
       const cls = (c.chg5d||0)<0 ? "down" : "up";
@@ -296,7 +316,7 @@ async function loadToday(){
          `<td class="num ${cls}">${fmt(c.chg5d!=null?(+c.chg5d).toFixed(2):null)}</td>`+
          `<td class="num">${c.amount!=null?(c.amount/1e8).toFixed(2):"—"}</td></tr>`;
     }
-    cb.innerHTML=h+"</tbody></table>";
+    cb.innerHTML=h+"</tbody></table></div>";
   }
 }
 
@@ -362,30 +382,63 @@ function drawChart(rows, th){
   });
 }
 
+/* ============ 持仓表格（持仓卡 / 任务结果 共用） ============ */
+/* 固定列宽，让「提示」列能换行而不是把表格撑爆；外层 .tbl-scroll 保证窄屏可横向滚动、不裁字。 */
+const HOLD_COLS='<colgroup>'+
+  '<col style="width:70px"><col style="width:106px"><col style="width:88px">'+
+  '<col style="width:62px"><col style="width:62px"><col style="width:66px">'+
+  '<col style="width:66px"><col style="width:98px"><col style="width:76px">'+
+  '<col><col style="width:52px"></colgroup>';
+
+// 价格类统一 2 位小数（原来用 round(,3) 会显示 1291.702 这种噪声）
+const n2 = v => (v==null||isNaN(v)) ? "—" : (+v).toFixed(2);
+const lvCls = lv => lv==="danger"?"lv-danger":(lv==="win"?"lv-win":(lv==="warn"?"lv-warn":"lv-ok"));
+
+function holdTable(rows, maxHold, withDel){
+  let h='<div class="tbl-scroll"><table class="hold">'+HOLD_COLS+
+    '<thead><tr><th>代码</th><th class="l">名称</th><th>买入日</th><th>买入价</th><th>最新价</th>'+
+    '<th>盈亏%</th><th>止损线</th><th>止盈1/2</th><th>持有日</th><th class="l">提示</th>'+
+    '<th></th></tr></thead><tbody>';
+  for(const x of rows){
+    const pnl=(x.pnl_pct==null||isNaN(x.pnl_pct))?'<span class="mut">—</span>'
+      :(x.pnl_pct>=0?'<span class="up">+':'<span class="down">')+(+x.pnl_pct).toFixed(2)+'%</span>';
+    const lv=(x.level==="danger"||x.level==="win"||x.level==="warn")?x.level:"ok";
+    const over=(maxHold!=null)&&((x.days_held||0)>=maxHold);
+    // 提示去重：① 与 action 重复的「正常持有」不再显示；
+    //           ② 已超期时「持有日」列会标红并打「超期」标，这里不再重复同一句话。
+    const tips=(x.alerts||[]).filter(a=>a && a!=="正常持有" && !(over && /^已持有 \d+/.test(a)));
+    const tipHtml=tips.length
+      ? tips.map(a=>'<span class="alert-pill '+lvCls(lv)+'">'+esc(a)+'</span>').join('')
+      : '';
+    const tp=(x.tp1_price==null&&x.tp2_price==null)?'—':n2(x.tp1_price)+" / "+n2(x.tp2_price);
+    h+='<tr><td>'+esc(x.code)+'</td>'+
+       '<td class="l nm" title="'+esc(x.name||'')+'">'+esc(x.name||'')+'</td>'+
+       '<td>'+esc(x.buy_date)+'</td>'+
+       '<td class="num">'+n2(x.buy_price)+'</td>'+
+       '<td class="num">'+n2(x.last)+'</td>'+
+       '<td class="num">'+pnl+'</td>'+
+       '<td class="num">'+n2(x.stop_price)+'</td>'+
+       '<td class="num">'+tp+'</td>'+
+       '<td class="num'+(over?' days-over':'')+'">'+(x.days_held||0)+
+         (over?'<span class="ovt">超期</span>':'')+'</td>'+
+       '<td class="tip"><span class="alert-pill '+lvCls(x.level)+'">'+esc(x.action||"持有")+'</span>'+
+         tipHtml+'</td>'+
+       '<td>'+((withDel&&x.id!=null)?'<button class="del" onclick="delHolding('+x.id+')">删除</button>':'')+'</td></tr>';
+  }
+  return h+'</tbody></table></div>';
+}
+
 async function loadHoldings(){
   const d=await jget("/api/holdings");
   const box=$("holdBox");
-  if(!d.holdings.length){ box.innerHTML='<div class="empty">还没有持仓记录。</div>'; return; }
-  let h='<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>最新价</th>'+
-        '<th>盈亏%</th><th>止损线</th><th>止盈1/2</th><th>持有日</th><th>提示</th><th></th></tr></thead><tbody>';
-  for(const x of d.holdings){
-    const pnl = (x.pnl_pct==null||isNaN(x.pnl_pct)) ? "—"
-      : (x.pnl_pct>=0?'<span class="up">+':'<span class="down">')+(+x.pnl_pct).toFixed(2)+'%</span>';
-    let pills = (x.alerts||[]).map(a=>`<span class="alert-pill lv-${x.level}">${a}</span>`).join("");
-    if(!pills) pills='<span class="alert-pill lv-ok">正常持有</span>';
-    const actcls = x.level==="danger"?"lv-danger":(x.level==="win"?"lv-win":"lv-warn");
-    h+=`<tr><td>${x.code}</td><td>${x.name||""}</td><td>${x.buy_date}</td>`+
-       `<td class="num">${fmt(x.buy_price!=null?(+x.buy_price).toFixed(2):null)}</td>`+
-       `<td class="num">${fmt(x.last!=null?(+x.last).toFixed(2):null)}</td>`+
-       `<td class="num">${pnl}</td>`+
-       `<td class="num">${fmt(x.stop_price)}</td>`+
-       `<td class="num">${fmt(x.tp1_price)} / ${fmt(x.tp2_price)}</td>`+
-       `<td class="num">${x.days_held}</td>`+
-       `<td style="text-align:left"><span class="alert-pill ${actcls}">${x.action}</span>${pills?("<br>"+pills):""}</td>`+
-       `<td><button class="mini" style="cursor:pointer;color:#c81e1e;background:none;border:0"
-          onclick="delHolding(${x.id})">删除</button></td></tr>`;
+  // 卡片标题里的止损/止盈/持有上限跟随 strategy_config.json，改配置后刷新即变
+  if(d.exit){
+    const e=d.exit, sg=v=>v>=0?"+":""; 
+    $("tagHold").textContent="止损 "+sg(e.stop_pct)+e.stop_pct+"% · 止盈 "
+      +sg(e.tp1_pct)+e.tp1_pct+"%/"+sg(e.tp2_pct)+e.tp2_pct+"% · 最长 "+e.max_hold_days+" 日";
   }
-  box.innerHTML=h+"</tbody></table>";
+  if(!d.holdings.length){ box.innerHTML='<div class="empty">还没有持仓记录。</div>'; return; }
+  box.innerHTML=holdTable(d.holdings, d.max_hold_days, true);
 }
 
 async function addHolding(){
@@ -435,37 +488,22 @@ function renderBlocks(blocks){
       for(const r of rows) h+='<tr><td>'+esc(r.k)+'</td><td class="num">'+esc(r.v)+'</td></tr>';
       h+='</tbody></table>';
     }else if(b.kind==='candidates'){
-      h+='<table><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
+      h+='<div class="tbl-scroll"><table class="cand"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
          '<th>换手%</th><th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
       for(const c of rows){
+        // close 也可能为 null —— 直接 toFixed 会抛错，导致整块任务结果渲染失败，统一 fmt() 兜底
         h+='<tr><td>'+esc(c.code)+'</td><td>'+esc(c.name||'')+'</td>'+
-           '<td class="num">'+(+c.close).toFixed(2)+'</td>'+
+           '<td class="num">'+fmt(c.close!=null?(+c.close).toFixed(2):null)+'</td>'+
            '<td class="num down">'+(c.bias!=null?(+c.bias).toFixed(2):'—')+'</td>'+
            '<td class="num">'+(c.turnover_pct!=null?(+c.turnover_pct).toFixed(2):'—')+'</td>'+
            '<td class="num">'+(c.vol_ratio!=null?(+c.vol_ratio).toFixed(2):'—')+'</td>'+
            '<td class="num">'+(c.chg5d!=null?(+c.chg5d).toFixed(2):'—')+'</td>'+
            '<td class="num">'+(c.amount!=null?(c.amount/1e8).toFixed(2):'—')+'</td></tr>';
       }
-      h+='</tbody></table>';
+      h+='</tbody></table></div>';
     }else if(b.kind==='holdings'){
-      h+='<table><thead><tr><th>代码</th><th>名称</th><th>买入日</th><th>买入价</th><th>最新价</th>'+
-         '<th>盈亏%</th><th>止损线</th><th>止盈1/2</th><th>持有日</th><th>提示</th></tr></thead><tbody>';
-      for(const x of rows){
-        const pnl = x.pnl_pct==null ? '—'
-          : (x.pnl_pct>=0?'<span class="up">+':'<span class="down">')+(+x.pnl_pct).toFixed(2)+'%</span>';
-        const lv = x.level==='danger'?'danger':(x.level==='win'?'win':(x.level==='warn'?'warn':'ok'));
-        const al=(x.alerts||[]).map(a=>'<span class="alert-pill lv-'+lv+'">'+esc(a)+'</span>').join('<br>');
-        h+='<tr><td>'+esc(x.code)+'</td><td>'+esc(x.name||'')+'</td><td>'+esc(x.buy_date)+'</td>'+
-           '<td class="num">'+fmt(x.buy_price!=null?(+x.buy_price).toFixed(2):null)+'</td>'+
-           '<td class="num">'+(x.last!=null?(+x.last).toFixed(2):'—')+'</td>'+
-           '<td class="num">'+pnl+'</td>'+
-           '<td class="num">'+(x.stop_price!=null?x.stop_price:'—')+'</td>'+
-           '<td class="num">'+((x.tp1_price!=null?x.tp1_price:'—')+' / '+(x.tp2_price!=null?x.tp2_price:'—'))+'</td>'+
-           '<td class="num">'+(x.days_held||0)+'</td>'+
-           '<td style="text-align:left"><span class="alert-pill lv-'+lv+'">'+esc(x.action||'')+'</span>'+
-           (al?'<br>'+al:'')+'</td></tr>';
-      }
-      h+='</tbody></table>';
+      // 与「我的持仓」卡片共用同一套表格渲染，保证两处样式一致、都不会裁字
+      h+=holdTable(rows, b.max_hold_days || ((rows[0]||{}).max_hold_days), false);
     }
     h+='</div>';
   }
