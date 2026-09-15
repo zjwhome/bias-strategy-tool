@@ -1,0 +1,17 @@
+# ============================================================
+#  Git 属性 · 保证跨机器行为一致
+# ============================================================
+
+# ★ Windows 批处理文件必须使用 CRLF 行尾。
+#   如果以 LF 行尾分发，cmd.exe 解析 goto / 标签时可能出错，
+#   导致别人拿到项目后双击没反应。这里强制 checkout 为 CRLF，
+#   GitHub 的 Download ZIP 也会按此转换。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 图标与图片按二进制处理
+*.ico binary
+*.png binary
+
+# Notebook / 其他文本按 LF
+*.sh text eol=lf
