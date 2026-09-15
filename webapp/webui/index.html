@@ -1,201 +1,552 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light" data-theme-pref="auto">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>乖离率策略 · 每日参考</title>
+<!-- 主题必须在首屏渲染之前定好，否则会先白闪一下再变深色 -->
+<script>
+(function(){
+  var pref = 'auto';
+  try { pref = localStorage.getItem('bia_theme') || 'auto'; } catch(e){}
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var theme = (pref === 'dark' || (pref === 'auto' && dark)) ? 'dark' : 'light';
+  var el = document.documentElement;
+  el.setAttribute('data-theme', theme);
+  el.setAttribute('data-theme-pref', pref);
+})();
+</script>
 <style>
+/* ==========================================================================
+   1 · 设计令牌
+   --------------------------------------------------------------------------
+   两层结构：语义令牌（--bg / --ink / --brand …）在下面按主题重定义。
+   颜色用 oklch()（已实测当前浏览器支持），中性色带极轻的蓝相而非纯灰。
+   ========================================================================== */
 :root{
-  --bg:#f4f6fb; --card:#ffffff; --line:#e6eaf2; --ink:#1a2233; --ink2:#5b6880;
-  --up:#d92b2b;      /* 涨 = 红（国内惯例） */
-  --down:#12a05c;    /* 跌 = 绿 */
-  --brand:#2f6bff; --warn:#f59e0b; --muted:#8b96ad;
-  --shadow:0 2px 10px rgba(24,40,80,.06);
+  /* --- 字体 --- */
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",
+    "PingFang SC","Hiragino Sans GB","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:ui-monospace,"Cascadia Mono","SF Mono","JetBrains Mono",Consolas,
+    "Liberation Mono",Menlo,monospace;
+
+  /* --- 字号阶梯（App 界面用固定 rem，不用流体；少而对比强） --- */
+  --t-xs:.75rem;      /* 12 · 角标 / 表头 / 标签 */
+  --t-sm:.8125rem;    /* 13 · 辅助信息 / 卡片标题 */
+  --t-md:.875rem;     /* 14 · 表格数字 */
+  --t-base:1rem;      /* 16 · 正文 */
+  --t-lg:1.125rem;    /* 18 · 品牌标题 */
+  --t-xl:1.3125rem;   /* 21 · 结论大字 */
+  --t-hero:clamp(2.75rem,9vw,3.5rem);  /* 唯一允许流体的一处 */
+
+  --lh-tight:1.25; --lh-base:1.6;
+
+  /* --- 间距（4px 基准） --- */
+  --s-1:4px;  --s-2:8px;  --s-3:12px; --s-4:16px; --s-5:20px;
+  --s-6:24px; --s-8:32px; --s-10:40px; --s-12:48px;
+
+  --r-sm:8px; --r-md:12px; --r-lg:16px; --r-pill:999px;
+
+  /* --- 动效（指数缓动，不用回弹） --- */
+  --ease:cubic-bezier(.25,1,.5,1);
+  --ease-expo:cubic-bezier(.16,1,.3,1);
+  --dur-1:.14s; --dur-2:.22s; --dur-3:.42s;
+
+  --wrap:1120px;
 }
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);
-  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;
-  font-size:14px;line-height:1.6;padding:0 0 60px}
-.wrap{max-width:1080px;margin:0 auto;padding:0 18px}
 
-/* ---------- 顶栏 ---------- */
-header{background:linear-gradient(135deg,#1f3a8a,#2f6bff);color:#fff;padding:18px 0;margin-bottom:20px;
-  box-shadow:0 4px 16px rgba(47,107,255,.22)}
-header .wrap{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
-.h-title{font-size:19px;font-weight:700;letter-spacing:.5px}
-.h-sub{font-size:12.5px;opacity:.85;margin-top:2px}
-.h-right{font-size:12.5px;text-align:right;opacity:.95;line-height:1.7}
-.btn{border:0;border-radius:9px;padding:9px 16px;font-size:13.5px;font-weight:600;cursor:pointer;
-  background:#fff;color:#1f3a8a;transition:.15s}
-.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.14)}
-.btn:disabled{opacity:.55;cursor:not-allowed;transform:none}
-.btn.ghost{background:rgba(255,255,255,.16);color:#fff;border:1px solid rgba(255,255,255,.35)}
+/* ---------------------------------------------------------------- 浅色主题 */
+:root,
+:root[data-theme="light"]{
+  color-scheme:light;
 
-/* ---------- 卡片 ---------- */
-.card{background:var(--card);border-radius:14px;box-shadow:var(--shadow);padding:20px 22px;margin-bottom:18px;
-  border:1px solid var(--line)}
-.card h2{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px}
-.card h2 .tag{font-size:11px;font-weight:600;color:var(--muted);background:#f0f3f9;border-radius:6px;padding:2px 8px}
+  --bg:         oklch(97.4% .005 258);
+  --surface:    oklch(99.6% .002 258);
+  --surface-2:  oklch(96.3% .008 258);
+  --surface-3:  oklch(93.4% .011 258);
+  --line:       oklch(90.4% .012 258);
+  --line-2:     oklch(83%   .016 258);
 
-/* ---------- 广度大卡 ---------- */
-.breadth-row{display:flex;gap:22px;align-items:stretch;flex-wrap:wrap}
-.breadth-box{flex:0 0 218px;border-radius:14px;padding:20px;text-align:center;color:#fff;
-  display:flex;flex-direction:column;justify-content:center;transition:.2s}
-.breadth-box .num{font-size:52px;font-weight:800;line-height:1.05;letter-spacing:-1px}
-.breadth-box .lab{font-size:12.5px;opacity:.92;margin-top:4px}
-.breadth-box .th{font-size:12px;opacity:.85;margin-top:8px;border-top:1px solid rgba(255,255,255,.3);padding-top:8px}
-.bid-ok{background:linear-gradient(135deg,#d92b2b,#ff5a4d)}       /* 达标 = 红（可动手） */
-.bid-no{background:linear-gradient(135deg,#4b5563,#6b7280)}       /* 未达标 = 灰 */
-.bid-na{background:linear-gradient(135deg,#9ca3af,#cbd5e1)}
-.breadth-info{flex:1;min-width:260px;display:flex;flex-direction:column;justify-content:center;gap:12px}
-.action{border-radius:12px;padding:16px 18px;font-size:16.5px;font-weight:700;border:1px solid}
-.act-ok{background:#fff5f5;color:#c81e1e;border-color:#ffd4d4}
-.act-no{background:#f5f7fa;color:#4b5563;border-color:#e3e8f0}
-.meta{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;color:var(--ink2)}
-.meta b{color:var(--ink);font-weight:700}
-.kv{background:#f7f9fc;border-radius:9px;padding:8px 12px}
+  --ink:        oklch(23%  .030 258);
+  --ink-2:      oklch(45%  .024 258);
+  --ink-3:      oklch(55%  .020 258);
 
-/* ---------- 表格 ---------- */
-table{width:100%;border-collapse:collapse;font-size:13.5px}
-th,td{padding:9px 10px;text-align:right;border-bottom:1px solid #eef1f7;white-space:nowrap}
-th{color:var(--muted);font-weight:600;font-size:12.5px;background:#fafbfe}
+  --brand:      oklch(55%  .185 258);
+  --brand-ink:  oklch(46%  .190 258);
+  --brand-soft: oklch(95.6% .032 258);
+  --brand-ring: oklch(55%  .185 258 / .38);
+  --on-brand:   oklch(100% 0 0);
+
+  --up:         oklch(54%  .205 25);     /* 涨 = 红（国内惯例） */
+  --up-soft:    oklch(95.6% .035 25);
+  --up-ring:    oklch(54%  .205 25 / .28);
+  --down:       oklch(52%  .132 158);    /* 跌 = 绿 */
+  --down-soft:  oklch(95.2% .034 158);
+  --warn:       oklch(58%  .140 68);
+  --warn-soft:  oklch(96.2% .048 78);
+
+  /* 「该出手」结论块的唯一高饱和用色 */
+  --alert-bg:   oklch(54%  .205 25);
+  --alert-ink:  oklch(100% 0 0);
+
+  --grid:       oklch(92.5% .010 258);
+  --shadow-1:0 1px 2px oklch(23% .03 258 / .05), 0 3px 12px oklch(23% .03 258 / .05);
+  --shadow-2:0 2px 4px oklch(23% .03 258 / .06), 0 12px 30px oklch(23% .03 258 / .07);
+}
+
+/* ---------------------------------------------------------------- 深色主题 */
+/* 深色不是把浅色反过来：层次靠「更亮的表面」而不是阴影，强调色略降饱和，字重略降。 */
+:root[data-theme="dark"]{
+  color-scheme:dark;
+
+  --bg:         oklch(17.5% .014 258);
+  --surface:    oklch(21.5% .016 258);
+  --surface-2:  oklch(25.2% .017 258);
+  --surface-3:  oklch(28.8% .018 258);
+  --line:       oklch(30.5% .018 258);
+  --line-2:     oklch(39%   .020 258);
+
+  --ink:        oklch(94%  .010 258);
+  --ink-2:      oklch(79%  .014 258);
+  --ink-3:      oklch(65%  .014 258);
+
+  --brand:      oklch(68%  .160 258);
+  --brand-ink:  oklch(80%  .130 258);
+  --brand-soft: oklch(28%  .046 258);
+  --brand-ring: oklch(68%  .160 258 / .45);
+  --on-brand:   oklch(20%  .030 258);
+
+  --up:         oklch(67%  .185 25);
+  --up-soft:    oklch(28%  .055 25);
+  --up-ring:    oklch(67%  .185 25 / .35);
+  --down:       oklch(67%  .130 158);
+  --down-soft:  oklch(27%  .045 158);
+  --warn:       oklch(74%  .130 72);
+  --warn-soft:  oklch(29%  .050 72);
+
+  /* 深色下用更深的红，保证白字对比度足够（浅色用 L54 红，深色用 L46 红） */
+  --alert-bg:   oklch(46%  .175 25);
+  --alert-ink:  oklch(97%  .012 25);
+
+  --grid:       oklch(27%  .016 258);
+  --shadow-1:none;
+  --shadow-2:0 1px 0 oklch(100% 0 0 / .04);
+}
+
+/* ==========================================================================
+   2 · 基础
+   ========================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--font-sans);font-size:var(--t-base);line-height:var(--lh-base);
+  font-kerning:normal;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  padding-bottom:calc(var(--s-12) + env(safe-area-inset-bottom));
+}
+.wrap{max-width:var(--wrap);margin-inline:auto;padding-inline:var(--s-5);
+  padding-left:max(var(--s-5),env(safe-area-inset-left));
+  padding-right:max(var(--s-5),env(safe-area-inset-right))}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+:focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:3px}
+
+/* 主题切换的过渡：只作用于颜色，且不覆盖各组件自己的 transform/box-shadow 过渡 */
+body,header,.card,.kv,.banner,.task,.gauge,.conclusion,.seg,.empty-mark,input[type=time]{
+  transition:background-color var(--dur-2) var(--ease),
+             border-color var(--dur-2) var(--ease),
+             color var(--dur-2) var(--ease);
+}
+
+/* ==========================================================================
+   3 · 顶栏
+   刻意不做饱和渐变铺底 —— 强调色要稀缺。品牌感靠字体与那枚小标记建立。
+   ========================================================================== */
+header{position:sticky;top:0;z-index:20;background:var(--surface);
+  border-bottom:1px solid var(--line);
+  padding-top:env(safe-area-inset-top)}
+.hdr{display:flex;align-items:center;justify-content:space-between;
+  gap:var(--s-4);flex-wrap:wrap;padding-block:var(--s-4)}
+.brand{display:flex;align-items:center;gap:var(--s-3);min-width:0}
+.brand-mark{display:grid;place-items:center;flex:0 0 auto;width:34px;height:34px;
+  border-radius:10px;background:var(--brand);color:var(--on-brand);
+  box-shadow:0 2px 10px var(--brand-ring)}
+.brand-title{margin:0;font-size:var(--t-lg);font-weight:700;letter-spacing:-.01em;
+  line-height:1.2;text-wrap:balance}
+.brand-sub{margin:1px 0 0;font-size:var(--t-sm);color:var(--ink-3)}
+.hdr-right{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap}
+.hdr-meta{font-size:var(--t-sm);color:var(--ink-3);text-align:right;line-height:1.5}
+.hdr-meta b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+
+/* 主题切换：三档显式选择，不做「点一下猜一圈」的隐晦交互 */
+.seg{display:inline-flex;gap:2px;padding:3px;border-radius:var(--r-md);
+  background:var(--surface-2);border:1px solid var(--line)}
+.seg-btn{font:inherit;font-size:var(--t-xs);font-weight:600;line-height:1;
+  border:0;border-radius:calc(var(--r-md) - 3px);padding:7px 11px;cursor:pointer;
+  background:transparent;color:var(--ink-3);min-height:32px;
+  transition:background-color var(--dur-1) var(--ease),color var(--dur-1) var(--ease)}
+.seg-btn[aria-checked="true"]{background:var(--surface);color:var(--ink);
+  box-shadow:0 1px 2px oklch(0% 0 0 / .07)}
+@media (hover:hover){.seg-btn:hover{color:var(--ink)}}
+
+/* ==========================================================================
+   4 · 按钮
+   ========================================================================== */
+.btn{font:inherit;font-size:var(--t-sm);font-weight:600;line-height:1;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid transparent;border-radius:var(--r-md);padding:10px 16px;
+  min-height:40px;cursor:pointer;background:var(--surface-2);color:var(--ink-2);
+  transition:background-color var(--dur-1) var(--ease),border-color var(--dur-1) var(--ease),
+             color var(--dur-1) var(--ease),transform var(--dur-1) var(--ease),
+             box-shadow var(--dur-1) var(--ease)}
+@media (hover:hover){
+  .btn:hover{background:var(--surface-3);color:var(--ink)}
+  .btn-primary:hover{filter:brightness(1.07)}
+}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none;filter:none}
+.btn-primary{background:var(--brand);color:var(--on-brand);box-shadow:0 1px 2px var(--brand-ring)}
+.btn-primary:hover{color:var(--on-brand)}
+.btn-ghost{background:var(--surface);color:var(--ink-2);border-color:var(--line)}
+.btn-sm{padding:7px 12px;min-height:34px;font-size:var(--t-xs);border-radius:var(--r-sm)}
+
+/* ==========================================================================
+   5 · 卡片
+   ========================================================================== */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
+  box-shadow:var(--shadow-1);padding:var(--s-5) var(--s-6);margin-bottom:var(--s-5)}
+.card>h2{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;
+  margin:0 0 var(--s-4);font-size:var(--t-sm);font-weight:700;
+  letter-spacing:.03em;color:var(--ink-2)}
+.card>h2 .tag{font-size:var(--t-xs);font-weight:500;letter-spacing:0;color:var(--ink-3);
+  background:var(--surface-2);border:1px solid var(--line);
+  border-radius:var(--r-pill);padding:2px 9px;font-variant-numeric:tabular-nums}
+
+/* 入场：轻微上浮 + 错落延迟。意在营造「数据在加载」的秩序感，不是耍花活。 */
+.card{animation:rise var(--dur-3) var(--ease-expo) both}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.wrap>.card:nth-of-type(2){animation-delay:0s}
+.wrap>.card:nth-of-type(3){animation-delay:.05s}
+.wrap>.card:nth-of-type(4){animation-delay:.10s}
+.wrap>.card:nth-of-type(5){animation-delay:.15s}
+.wrap>.card:nth-of-type(6){animation-delay:.20s}
+
+/* ==========================================================================
+   6 · 今日结论（hero）
+   ========================================================================== */
+.verdict{display:grid;grid-template-columns:minmax(168px,208px) 1fr;gap:var(--s-5)}
+.gauge{position:relative;display:flex;flex-direction:column;justify-content:center;
+  text-align:center;border-radius:var(--r-lg);padding:var(--s-5) var(--s-4);
+  background:var(--surface-2);border:1px solid var(--line)}
+.gauge .num{display:block;font-family:var(--font-mono);
+  font-size:var(--t-hero);font-weight:700;line-height:1;letter-spacing:-.035em;
+  font-variant-numeric:tabular-nums;color:var(--ink)}
+.gauge .lab{margin-top:var(--s-3);font-size:var(--t-xs);letter-spacing:.04em;color:var(--ink-3)}
+.gauge .th{margin-top:var(--s-2);padding-top:var(--s-2);border-top:1px solid var(--line);
+  font-size:var(--t-xs);color:var(--ink-3)}
+/* 达标＝该出手：整页唯一允许大面积高饱和色的地方 */
+.gauge.is-hot{background:var(--alert-bg);border-color:transparent;
+  box-shadow:0 6px 26px var(--up-ring)}
+.gauge.is-hot .num{color:var(--alert-ink)}
+.gauge.is-hot .lab,.gauge.is-hot .th{color:oklch(100% 0 0 / .92)}
+.gauge.is-hot .th{border-top-color:oklch(100% 0 0 / .32)}
+
+.verdict-body{display:flex;flex-direction:column;justify-content:center;gap:var(--s-4);min-width:0}
+.conclusion{border:1px solid var(--line);border-left-width:4px;border-radius:var(--r-md);
+  background:var(--surface-2);padding:var(--s-4) var(--s-4);
+  font-size:var(--t-xl);font-weight:700;line-height:1.35;letter-spacing:-.01em;
+  text-wrap:balance;color:var(--ink)}
+.conclusion.act-ok{background:var(--up-soft);border-color:var(--up-ring);
+  border-left-color:var(--up);color:var(--up)}
+.conclusion.act-no{background:var(--surface-2);border-color:var(--line);
+  border-left-color:var(--line-2);color:var(--ink-2)}
+
+.meta{display:flex;gap:var(--s-2);flex-wrap:wrap}
+.kv{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:var(--s-2) var(--s-3);font-size:var(--t-sm);color:var(--ink-3);white-space:nowrap}
+.kv b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+
+/* ==========================================================================
+   7 · 表格
+   ========================================================================== */
+.tbl-scroll{overflow-x:auto;overscroll-behavior-x:contain}
+table{width:100%;border-collapse:collapse;font-size:var(--t-md)}
+thead th{background:var(--surface-2);color:var(--ink-3);font-weight:600;
+  font-size:var(--t-xs);letter-spacing:.02em;text-align:right;white-space:nowrap;
+  padding:var(--s-3);border-bottom:1px solid var(--line)}
+tbody td{padding:var(--s-3);text-align:right;white-space:nowrap;
+  border-bottom:1px solid var(--line)}
+tbody tr:last-child td{border-bottom:0}
+@media (hover:hover){tbody tr:hover{background:var(--surface-2)}}
 th:first-child,td:first-child{text-align:left}
-tbody tr:hover{background:#f8fAff}
 td.num{font-variant-numeric:tabular-nums}
+td.code{font-family:var(--font-mono);font-size:var(--t-xs);letter-spacing:-.01em;color:var(--ink-2)}
 .up{color:var(--up);font-weight:600}
 .down{color:var(--down);font-weight:600}
-.mut{color:var(--muted)}
+.mut{color:var(--ink-3)}
+.tbl-hint{display:none;margin:0 0 var(--s-2);font-size:var(--t-xs);color:var(--ink-3)}
 
-/* ---------- 持仓表（固定列宽 + 可横向滚动，避免内容溢出被裁掉） ---------- */
-/* 原实现：11 列的表格用的是「自动列宽 + 全部 nowrap」，
-   列宽由最长的内容（提示文字）撑开，总宽超过卡片后文字被直接切掉（600519 那行就丢了「（-6%）」），
-   而且表头「提示」是右对齐、内容却是左对齐，看起来像错位。以下全部修掉。 */
-.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* 持仓表：固定列宽 + 可横向滚动，保证长文本换行而不是把表格撑爆后裁掉 */
 table.cand{min-width:720px}
 table.hold{table-layout:fixed;min-width:960px}
-table.hold th,table.hold td{padding:8px;vertical-align:middle}
+table.hold col{width:auto}
+table.hold th,table.hold td{padding:var(--s-2) var(--s-3);vertical-align:middle}
 table.hold th.l,table.hold td.l{text-align:left}
 table.hold td.nm{overflow:hidden;text-overflow:ellipsis}
-table.hold td.tip{white-space:normal;text-align:left;line-height:1.7;word-break:break-word}
-table.hold td.tip .alert-pill{margin-bottom:2px}
-table.hold .days-over{color:#b45309;font-weight:700}
-table.hold .ovt{display:inline-block;margin-left:4px;font-size:10.5px;font-weight:700;
-  color:#b45309;background:#fff7e6;border-radius:4px;padding:0 4px}
-.del{border:0;background:none;color:#c81e1e;font-size:12px;cursor:pointer;padding:3px 6px;border-radius:6px}
-.del:hover{background:#ffecec;color:#a01414}
+table.hold td.tip{white-space:normal;text-align:left;line-height:1.75;word-break:break-word}
+table.hold td.tip .alert-pill{margin:0 4px 3px 0}
+table.hold .days-over{color:var(--warn);font-weight:700}
 
-/* ---------- 其他 ---------- */
-.empty{color:var(--muted);text-align:center;padding:26px 0;font-size:13.5px}
-.chart-wrap{position:relative;height:250px}
-canvas{width:100%;height:250px;display:block}
-.legend{display:flex;gap:18px;font-size:12.5px;color:var(--ink2);margin-top:10px;flex-wrap:wrap}
-.legend i{display:inline-block;width:16px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
-.banner{border-radius:10px;padding:12px 16px;font-size:13.5px;margin-bottom:14px;display:none}
+/* ==========================================================================
+   8 · 状态徽标 / 提示胶囊
+   四档强度：红实底（必须动手）> 琥珀（锁利）> 中性 > 安静
+   ========================================================================== */
+.alert-pill{display:inline-block;border-radius:var(--r-pill);padding:2px 9px;
+  font-size:var(--t-xs);font-weight:600;line-height:1.7;margin-right:5px;white-space:nowrap}
+.lv-danger{background:var(--alert-bg);color:var(--alert-ink)}
+.lv-win{background:var(--warn-soft);color:var(--warn)}
+.lv-warn{background:var(--surface-3);color:var(--ink-2)}
+.lv-ok{background:var(--surface-2);color:var(--ink-3);border:1px solid var(--line)}
+.ovt{display:inline-block;margin-left:5px;font-size:10.5px;font-weight:700;
+  color:var(--warn);background:var(--warn-soft);border-radius:var(--r-sm);padding:0 5px}
+.chip{font-size:var(--t-xs);font-weight:600;border-radius:var(--r-pill);padding:2px 9px;
+  background:var(--surface-2);color:var(--ink-3);border:1px solid var(--line);white-space:nowrap}
+.chip.on{background:var(--brand-soft);color:var(--brand-ink);border-color:var(--brand-ring)}
+.del{border:0;background:none;color:var(--ink-3);font:inherit;font-size:var(--t-xs);
+  cursor:pointer;padding:5px 8px;border-radius:var(--r-sm);
+  transition:background-color var(--dur-1) var(--ease),color var(--dur-1) var(--ease)}
+@media (hover:hover){.del:hover{background:var(--up-soft);color:var(--up)}}
+
+/* ==========================================================================
+   9 · 空状态（这套策略 95% 的时间都停在这里，必须像「有意为之」而不像「坏了」）
+   ========================================================================== */
+.empty{display:flex;flex-direction:column;align-items:center;text-align:center;
+  padding:var(--s-8) var(--s-4);color:var(--ink-3)}
+.empty-mark{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;
+  background:var(--surface-2);border:1px solid var(--line);
+  color:var(--ink-3);font-size:var(--t-base);margin-bottom:var(--s-3)}
+.empty-title{margin:0;font-size:var(--t-sm);font-weight:700;color:var(--ink-2)}
+.empty-note{margin:var(--s-1) 0 0;font-size:var(--t-sm);line-height:1.65;max-width:46ch}
+
+/* ==========================================================================
+   10 · 提示条
+   ========================================================================== */
+.banner{display:none;border-radius:var(--r-md);padding:var(--s-3) var(--s-4);
+  font-size:var(--t-sm);line-height:1.7;border:1px solid;margin-bottom:var(--s-5)}
 .banner.show{display:block}
-.banner.info{background:#eef4ff;color:#1e40af;border:1px solid #d6e3ff}
-.banner.err{background:#fff1f1;color:#b91c1c;border:1px solid #ffd4d4}
+.banner.info{background:var(--brand-soft);border-color:var(--brand-ring);color:var(--brand-ink)}
+.banner.err{background:var(--up-soft);border-color:var(--up-ring);color:var(--up)}
+.banner b{font-weight:700}
 
-/* 持仓 */
-.alert-pill{display:inline-block;border-radius:6px;padding:2px 7px;font-size:11.5px;font-weight:600;margin-right:5px}
-.lv-danger{background:#ffe8e8;color:#c81e1e}
-.lv-win{background:#fdeee9;color:#c2410c}
-.lv-warn{background:#fff7e6;color:#b45309}
-.lv-ok{background:#eef2f7;color:#5b6880}
-.hform{display:flex;gap:9px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px;
-  background:#f7f9fc;border-radius:11px;padding:14px}
-.hform label{font-size:12px;color:var(--ink2);display:block;margin-bottom:4px}
-.hform input{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13.5px;width:118px;
-  background:#fff;color:var(--ink)}
-.hform input:focus{outline:none;border-color:var(--brand)}
-.mini{font-size:12px;color:var(--muted)}
-footer{text-align:center;color:var(--muted);font-size:12px;margin-top:26px;line-height:1.9}
+/* ==========================================================================
+   11 · 图表
+   ========================================================================== */
+.chart-wrap{position:relative;height:clamp(200px,30vw,280px)}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.legend{display:flex;gap:var(--s-4);flex-wrap:wrap;align-items:center;
+  margin-top:var(--s-3);font-size:var(--t-sm);color:var(--ink-2)}
+.legend i{display:inline-block;width:16px;height:3px;border-radius:2px;
+  margin-right:6px;vertical-align:middle}
+.lg-bar{background:var(--brand)}
+.lg-th{background:var(--warn)}
+.legend .mini{margin-left:auto}
 
-/* ---------- 任务中心 ---------- */
-.task{border:1px solid var(--line);border-radius:12px;padding:15px 17px;margin-bottom:13px;
-  background:#fcfdff;transition:.15s}
-.task:hover{border-color:#cfdcff;box-shadow:0 2px 10px rgba(47,107,255,.07)}
-.task.running{border-color:#9db6ff;background:#f7faff}
-.task-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
-.task-title{font-size:15px;font-weight:700;display:flex;align-items:center;gap:7px}
-.task-title .ico{font-size:17px}
-.chip{font-size:11px;font-weight:600;color:#5b6880;background:#eef2f8;border-radius:6px;padding:2px 7px}
-.chip.on{background:#e6f0ff;color:#1d4ed8}
-.chip.off{background:#f1f3f7;color:#8b96ad}
-.task-desc{font-size:13px;color:var(--ink2);margin-top:6px;line-height:1.7}
-.task-more{font-size:12.5px;color:var(--muted);margin-top:5px;line-height:1.7;
-  border-left:3px solid #e6eaf2;padding-left:10px;display:none}
+/* ==========================================================================
+   12 · 任务中心
+   ========================================================================== */
+.task{border:1px solid var(--line);border-radius:var(--r-md);
+  padding:var(--s-4);margin-bottom:var(--s-3);background:var(--surface)}
+@media (hover:hover){.task:hover{border-color:var(--line-2);box-shadow:var(--shadow-1)}}
+.task.running{border-color:var(--brand-ring);background:var(--brand-soft)}
+.task-head{display:flex;justify-content:space-between;align-items:flex-start;
+  gap:var(--s-3);flex-wrap:wrap}
+.task-title{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;
+  font-size:var(--t-md);font-weight:700;color:var(--ink)}
+.task-title .ico{font-size:var(--t-base);line-height:1}
+.task-desc{margin-top:var(--s-2);font-size:var(--t-sm);color:var(--ink-2);line-height:1.7}
+.task-more{display:none;margin-top:var(--s-2);padding-left:var(--s-3);
+  border-left:2px solid var(--line);font-size:var(--t-sm);color:var(--ink-3);line-height:1.75}
 .task-more.show{display:block}
-.task-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:13px;
-  padding-top:12px;border-top:1px dashed #e6eaf2}
-.btn.sm{padding:7px 14px;font-size:13px;border-radius:8px}
-.btn.primary{background:#2f6bff;color:#fff}
-.btn.ghost2{background:#fff;color:#334155;border:1px solid var(--line)}
-.task-row input[type=time]{border:1px solid var(--line);border-radius:8px;padding:6px 8px;
-  font-size:13px;background:#fff;color:var(--ink)}
-.days{display:flex;gap:5px}
-.days label{font-size:12px;display:flex;align-items:center;gap:3px;cursor:pointer;
-  background:#fff;border:1px solid var(--line);border-radius:6px;padding:4px 7px;color:var(--ink2)}
-.days input{margin:0}
-.sw{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink2);cursor:pointer;
-  background:#fff;border:1px solid var(--line);border-radius:8px;padding:7px 11px}
-.task-last{margin-top:11px;font-size:12.5px;color:var(--ink2);display:flex;gap:10px;
-  align-items:center;flex-wrap:wrap}
-.task-prog{margin-top:10px;display:none}
+.task-row{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;
+  margin-top:var(--s-3);padding-top:var(--s-3);border-top:1px dashed var(--line)}
+.task-row input[type=time]{font:inherit;font-size:var(--t-sm);color:var(--ink);
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:7px 8px;min-height:34px}
+.days{display:flex;gap:5px;flex-wrap:wrap}
+.days label{display:flex;align-items:center;gap:4px;cursor:pointer;
+  font-size:var(--t-xs);color:var(--ink-2);background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--r-sm);padding:5px 8px;min-height:32px}
+.days input{margin:0;accent-color:var(--brand)}
+.sw{display:flex;align-items:center;gap:7px;cursor:pointer;font-size:var(--t-sm);
+  color:var(--ink-2);background:var(--surface);border:1px solid var(--line);
+  border-radius:var(--r-sm);padding:7px 11px;min-height:34px}
+.sw input{accent-color:var(--brand)}
+.task-last{margin-top:var(--s-3);font-size:var(--t-sm);color:var(--ink-2);
+  display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;line-height:1.7}
+.task-prog{display:none;margin-top:var(--s-3)}
 .task-prog.show{display:block}
-.pbar{height:7px;background:#eef2f8;border-radius:4px;overflow:hidden}
-.pbar i{display:block;height:100%;background:linear-gradient(90deg,#2f6bff,#6b9bff);width:0;transition:.3s}
-.pmsg{font-size:12px;color:var(--muted);margin-top:5px}
-.blk{margin-top:12px;border-top:1px solid #eef1f7;padding-top:11px}
-.blk:first-child{border-top:0;padding-top:0}
-.blk-t{font-size:13.5px;font-weight:700;margin-bottom:8px;color:var(--ink)}
-.blk-txt{font-size:13px;color:var(--ink2);line-height:1.85;white-space:pre-wrap}
-.blk-txt b{color:#c81e1e}
-.st-ok{color:#12a05c;font-weight:700}
-.st-fail{color:#c81e1e;font-weight:700}
-.st-running{color:#2f6bff;font-weight:700}
-details.hist{margin-top:10px}
-details.hist summary{font-size:12.5px;color:var(--brand);cursor:pointer;list-style:none}
+.pbar{height:6px;background:var(--surface-3);border-radius:var(--r-pill);overflow:hidden}
+.pbar i{display:block;height:100%;width:0;border-radius:var(--r-pill);
+  background:linear-gradient(90deg,var(--brand),color-mix(in oklab,var(--brand),oklch(80% .10 258)));
+  transition:width var(--dur-3) var(--ease)}
+.pmsg{margin-top:6px;font-size:var(--t-xs);color:var(--ink-3)}
+.blk{margin-top:var(--s-3);padding-top:var(--s-3);border-top:1px solid var(--line)}
+.blk:first-child{margin-top:var(--s-3);border-top:0;padding-top:0}
+.blk-t{margin-bottom:var(--s-2);font-size:var(--t-sm);font-weight:700;color:var(--ink)}
+.blk-txt{font-size:var(--t-sm);color:var(--ink-2);line-height:1.85;white-space:pre-wrap}
+.blk-txt b{color:var(--up);font-weight:700}
+.st-ok{color:var(--down);font-weight:700}
+.st-fail{color:var(--up);font-weight:700}
+.st-running{color:var(--brand);font-weight:700}
+.mini{font-size:var(--t-xs);color:var(--ink-3)}
+details.hist{margin-top:var(--s-3)}
+details.hist summary{font-size:var(--t-sm);color:var(--brand);cursor:pointer;
+  list-style:none;padding:3px 0}
 details.hist summary::-webkit-details-marker{display:none}
-details.hist summary:before{content:"▸ ";}
-details.hist[open] summary:before{content:"▾ ";}
-.hist-body{font-size:12.5px;color:var(--ink2);margin-top:8px;line-height:1.8}
-.hist-item{border-bottom:1px dashed #eef1f7;padding:7px 0}
+details.hist summary::before{content:"▸ "}
+details.hist[open] summary::before{content:"▾ "}
+.hist-body{margin-top:var(--s-2);font-size:var(--t-sm);color:var(--ink-2);line-height:1.8}
+.hist-item{padding:7px 0;border-bottom:1px dashed var(--line)}
 .hist-item:last-child{border-bottom:0}
+
+/* ==========================================================================
+   13 · 持仓录入表单
+   ========================================================================== */
+.hform{display:flex;gap:var(--s-3);flex-wrap:wrap;align-items:flex-end;
+  margin-bottom:var(--s-4);padding:var(--s-4);
+  background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-md)}
+.hform>div{display:flex;flex-direction:column;gap:4px}
+.hform label{font-size:var(--t-xs);color:var(--ink-3)}
+.hform input{font:inherit;font-size:var(--t-sm);color:var(--ink);background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 10px;
+  width:118px;min-height:38px;
+  transition:border-color var(--dur-1) var(--ease),box-shadow var(--dur-1) var(--ease),
+             background-color var(--dur-2) var(--ease),color var(--dur-2) var(--ease)}
+.hform input::placeholder{color:var(--ink-3);opacity:1}
+.hform input:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-ring)}
+
+/* ==========================================================================
+   14 · 页脚
+   ========================================================================== */
+footer{margin-top:var(--s-8);text-align:center;font-size:var(--t-xs);
+  color:var(--ink-3);line-height:1.9;padding-bottom:var(--s-4)}
+footer b{color:var(--ink-2)}
+
+/* ==========================================================================
+   15 · 响应式
+   --------------------------------------------------------------------------
+   断点按内容需要设定（640 / 760 / 900），不是照搬设备尺寸。
+   小屏时宽表格改为「卡片」而非横向滚动，避免把关键列推出视口。
+   ========================================================================== */
+@media (max-width:900px){
+  .verdict{grid-template-columns:minmax(150px,178px) 1fr;gap:var(--s-4)}
+}
+@media (max-width:760px){
+  :root{--s-5:16px;--s-6:16px}
+  .card{padding:var(--s-4);border-radius:var(--r-md)}
+  .verdict{grid-template-columns:1fr;gap:var(--s-4)}
+  .gauge{padding:var(--s-4)}
+  .gauge .num{font-size:clamp(2.5rem,14vw,3.25rem)}
+  .conclusion{font-size:var(--t-lg);padding:var(--s-3) var(--s-4)}
+  .hdr{padding-block:var(--s-3)}
+  .hdr-right{width:100%;justify-content:space-between}
+  .hdr-meta{text-align:left}
+  .legend .mini{margin-left:0;flex-basis:100%}
+}
+/* 窄屏下把两张数据表改成卡片式，标签在左、数值在右；不隐藏任何字段 */
+@media (max-width:640px){
+  .tbl-scroll{overflow-x:visible}
+  .tbl-hint{display:block}
+  table.hold,table.cand{min-width:0;table-layout:auto;font-size:var(--t-sm)}
+  table.hold col,table.cand col{width:auto !important}
+  table.hold thead,table.cand thead{display:none}
+  table.hold tbody,table.cand tbody{display:block}
+  table.hold tbody tr,table.cand tbody tr{display:grid;grid-template-columns:1fr 1fr;
+    gap:1px var(--s-4);padding:var(--s-3);margin-bottom:var(--s-3);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-md)}
+  table.hold tbody td,table.cand tbody td{display:flex;align-items:baseline;
+    justify-content:space-between;gap:var(--s-2);padding:3px 0;border:0;
+    text-align:right;white-space:normal;overflow:visible;max-width:none}
+  table.hold tbody td::before,table.cand tbody td::before{
+    content:attr(data-label);flex:0 0 auto;text-align:left;white-space:nowrap;
+    font-size:var(--t-xs);font-weight:600;color:var(--ink-3)}
+  table.hold tbody td.tip,table.cand tbody td.tip{grid-column:1 / -1;display:block;
+    text-align:left;margin-top:var(--s-2);padding-top:var(--s-2);
+    border-top:1px dashed var(--line)}
+  table.hold tbody td.tip::before{display:block;margin-bottom:5px}
+  table.hold tbody td.act{grid-column:1 / -1;justify-content:flex-end;padding-top:0}
+  table.hold tbody td.act::before{content:none}
+}
+@media (max-width:420px){
+  table.hold tbody tr,table.cand tbody tr{grid-template-columns:1fr}
+  .gauge .num{font-size:clamp(2.25rem,16vw,2.75rem)}
+}
+/* 触摸设备：加大点击目标 */
+@media (pointer:coarse){
+  .btn{min-height:44px;padding:12px 18px}
+  .btn-sm{min-height:40px}
+  .seg-btn{min-height:38px;padding:9px 12px}
+  .days label{min-height:38px}
+  .sw{min-height:40px}
+  .del{padding:9px 12px}
+  details.hist summary{padding:9px 0}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-delay:0s !important;
+    animation-iteration-count:1 !important;transition-duration:.01ms !important;
+    scroll-behavior:auto !important}
+}
 </style>
 </head>
 <body>
 
 <header>
-  <div class="wrap">
-    <div>
-      <div class="h-title">📊 乖离率策略 · 每日参考</div>
-      <div class="h-sub">超跌抄底 · 只在"该出手的日子"出手</div>
+  <div class="wrap hdr">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+          <path d="M3.5 20.5h17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <rect x="4.6" y="12.4" width="3.4" height="6" rx="1.1" fill="currentColor"/>
+          <rect x="10.3" y="8.2" width="3.4" height="10.2" rx="1.1" fill="currentColor"/>
+          <rect x="16" y="4" width="3.4" height="14.4" rx="1.1" fill="currentColor"/>
+        </svg>
+      </span>
+      <div>
+        <h1 class="brand-title">乖离率策略 · 每日参考</h1>
+        <p class="brand-sub">超跌抄底 · 只在值得出手的日子出手</p>
+      </div>
     </div>
-    <div style="display:flex;align-items:center;gap:14px">
-      <div class="h-right" id="hRight">加载中…</div>
-      <button class="btn ghost" id="btnUpdate">更新数据</button>
+    <div class="hdr-right">
+      <div class="hdr-meta" id="hRight">加载中…</div>
+      <div class="seg" id="themeSeg" role="radiogroup" aria-label="配色主题">
+        <button type="button" class="seg-btn" data-theme-pref="light" role="radio" aria-checked="false">浅色</button>
+        <button type="button" class="seg-btn" data-theme-pref="dark" role="radio" aria-checked="false">深色</button>
+        <button type="button" class="seg-btn" data-theme-pref="auto" role="radio" aria-checked="true">自动</button>
+      </div>
+      <button class="btn btn-primary" id="btnUpdate">更新数据</button>
     </div>
   </div>
 </header>
 
 <div class="wrap">
-  <div class="banner info" id="banner"></div>
+  <div class="banner info" id="banner" role="status" aria-live="polite"></div>
 
-  <!-- 今日广度 -->
+  <!-- 今日广度：整个页面的第一眼答案 -->
   <div class="card">
     <h2>今日广度 <span class="tag" id="tagDate">—</span></h2>
-    <div class="breadth-row">
-      <div class="breadth-box bid-na" id="breadthBox">
-        <div class="num" id="breadthNum">—</div>
-        <div class="lab">全市场信号股票数</div>
-        <div class="th" id="breadthTh">门槛 ≥ 50</div>
+    <div class="verdict">
+      <div class="gauge" id="breadthBox">
+        <span class="num" id="breadthNum">—</span>
+        <span class="lab">全市场信号股票数</span>
+        <span class="th" id="breadthTh">门槛 ≥ 50</span>
       </div>
-      <div class="breadth-info">
-        <div class="action act-no" id="actionText">加载中…</div>
+      <div class="verdict-body">
+        <div class="conclusion act-no" id="actionText">加载中…</div>
         <div class="meta">
           <div class="kv">交易日：<b id="mDate">—</b></div>
           <div class="kv">更新时间：<b id="mUpd">—</b></div>
-          <div class="kv">仅乖离率≤-15%：<b id="mBias">—</b> 只</div>
+          <div class="kv">仅乖离率 ≤ -15%：<b id="mBias">—</b> 只</div>
           <div class="kv">全市场：<b id="mTotal">—</b> 只</div>
         </div>
       </div>
@@ -205,42 +556,48 @@ details.hist[open] summary:before{content:"▾ ";}
   <!-- 任务中心 -->
   <div class="card" id="taskCard">
     <h2>任务中心 <span class="tag">什么时候跑，由你决定</span></h2>
-    <div class="banner info show" style="margin-bottom:15px">
+    <div class="banner info show" style="margin-bottom:var(--s-4)">
       ★ 三个任务默认<b>全都是「不定时」</b>的。你可以随时点「立即执行」马上跑一次，
       或者打开「定时执行」开关，让它每天到点自动跑。<b>网站本身绝不会自己偷偷定时。</b>
     </div>
-    <div id="taskList"><div class="empty">加载中…</div></div>
+    <div id="taskList"><div class="empty"><span class="empty-mark">⋯</span>
+      <p class="empty-title">正在读取任务状态</p></div></div>
   </div>
 
   <!-- 历史广度 -->
   <div class="card">
     <h2>历史广度走势 <span class="tag">近 250 个交易日</span></h2>
-    <div class="chart-wrap"><canvas id="chart" width="1020" height="250"></canvas></div>
+    <div class="chart-wrap"><canvas id="chart" role="img"
+      aria-label="近 250 个交易日的每日信号广度柱状图，含出手门槛参考线"></canvas></div>
     <div class="legend">
-      <span><i style="background:#2f6bff"></i>每日广度</span>
-      <span><i style="background:#f59e0b"></i>出手门槛（50）</span>
-      <span class="mini">柱子越高＝市场越恐慌＝机会越大</span>
+      <span><i class="lg-bar"></i>每日广度</span>
+      <span><i class="lg-th"></i>出手门槛（<span id="lgTh">50</span>）</span>
+      <span class="mini">柱子越高 ＝ 市场越恐慌 ＝ 机会越大</span>
     </div>
   </div>
 
   <!-- 候选股 -->
   <div class="card">
     <h2>今日候选股 <span class="tag" id="tagCand">仅达标时显示</span></h2>
-    <div id="candBox"><div class="empty">广度未达标，今天不用看个股。</div></div>
+    <div id="candBox"><div class="empty"><span class="empty-mark">✓</span>
+      <p class="empty-title">广度未达标，今天不用看个股</p>
+      <p class="empty-note">空仓等待是策略的一部分 —— 机会一年只有几次。</p></div></div>
   </div>
 
   <!-- 我的持仓 -->
   <div class="card">
     <h2>我的持仓 <span class="tag" id="tagHold">止损 -6% · 止盈 +6%/+10% · 最长 10 日</span></h2>
     <div class="hform">
-      <div><label>股票代码</label><input id="fCode" placeholder="如 300274"></div>
-      <div><label>名称（可空）</label><input id="fName" placeholder="自动填"></div>
-      <div><label>买入日期</label><input id="fDate" type="date"></div>
-      <div><label>买入价</label><input id="fPrice" placeholder="如 91.50"></div>
-      <div><label>股数（可空）</label><input id="fShares" placeholder="0"></div>
-      <button class="btn" id="btnAdd" style="background:#2f6bff;color:#fff">加入持仓</button>
+      <div><label for="fCode">股票代码</label><input id="fCode" placeholder="如 300274" inputmode="numeric"></div>
+      <div><label for="fName">名称（可空）</label><input id="fName" placeholder="自动填"></div>
+      <div><label for="fDate">买入日期</label><input id="fDate" type="date"></div>
+      <div><label for="fPrice">买入价</label><input id="fPrice" placeholder="如 91.50" inputmode="decimal"></div>
+      <div><label for="fShares">股数（可空）</label><input id="fShares" placeholder="0" inputmode="numeric"></div>
+      <button class="btn btn-primary" id="btnAdd">加入持仓</button>
     </div>
-    <div id="holdBox"><div class="empty">还没有持仓记录。</div></div>
+    <div id="holdBox"><div class="empty"><span class="empty-mark">＋</span>
+      <p class="empty-title">还没有持仓记录</p>
+      <p class="empty-note">买入后在上面登记「代码 / 买入日期 / 买入价」，页面会自动帮你盯止损与止盈。</p></div></div>
   </div>
 
   <footer>
@@ -252,6 +609,50 @@ details.hist[open] summary:before{content:"▾ ";}
 <script>
 const $ = id => document.getElementById(id);
 const fmt = n => (n===null||n===undefined||isNaN(n)) ? "—" : n;
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ★ 必须声明在 applyTheme 之前：applyTheme 会在脚本首次执行时就被调用，
+//   而它内部要读 LAST_HIST 决定是否重画曲线。用 let 声明在后面会触发暂时性死区报错。
+let LAST_HIST=null, LAST_TH=50;
+
+/* ============ 主题 ============ */
+function applyTheme(pref){
+  const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = (pref==='dark' || (pref==='auto' && dark)) ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', theme);
+  document.documentElement.setAttribute('data-theme-pref', pref);
+  try{ localStorage.setItem('bia_theme', pref); }catch(e){}
+  document.querySelectorAll('#themeSeg .seg-btn').forEach(b=>
+    b.setAttribute('aria-checked', String(b.dataset.themePref === pref)));
+  // Canvas 不是 CSS，换主题后必须按新配色重画
+  if(LAST_HIST) drawChart(LAST_HIST, LAST_TH);
+}
+document.querySelectorAll('#themeSeg .seg-btn').forEach(b=>
+  b.addEventListener('click', ()=> applyTheme(b.dataset.themePref)));
+if(window.matchMedia){
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  const onChange = ()=>{ if(document.documentElement.getAttribute('data-theme-pref')==='auto')
+    applyTheme('auto'); };
+  mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
+}
+// 首屏同步一次（内联脚本已经设过，这里保证按钮状态正确）
+applyTheme(document.documentElement.getAttribute('data-theme-pref') || 'auto');
+
+/* 大数字滚动到位：只在数值真的变化时跑，且尊重「减少动态效果」设置 */
+function setNum(el, to){
+  const from = parseInt(el.textContent, 10);
+  if(reduceMotion() || !isFinite(from) || from === to || Math.abs(to-from) > 3000){
+    el.textContent = to; return;
+  }
+  const t0 = performance.now(), dur = 520;
+  (function step(now){
+    const p = Math.min(1, (now - t0) / dur);
+    const e = 1 - Math.pow(1 - p, 4);          // ease-out-quart
+    el.textContent = Math.round(from + (to - from) * e);
+    if(p < 1) requestAnimationFrame(step);
+  })(t0);
+}
 
 function showBanner(msg, type){
   const b=$("banner"); b.className="banner show "+(type||"info"); b.textContent=msg;
@@ -277,70 +678,94 @@ async function loadStatus(){
 async function loadToday(){
   const t=await jget("/api/today");
   if(!t.ok){
+    // ★ 无数据时必须把首屏从「加载中…」改成一个明确的说法，
+    //   否则页面会一直停在 loading 状态，用户以为程序没跑起来。
     showBanner(t.msg||"尚无数据，请点右上角「更新数据」。","err");
+    const act=$("actionText");
+    act.textContent="还没有数据 —— 先跑一次盘后任务";
+    act.className="conclusion act-no";
+    $("breadthBox").className="gauge";
+    $("tagCand").textContent="仅达标时显示";
     return;
   }
   hideBanner();
   $("tagDate").textContent = t.date;
-  $("breadthNum").textContent = t.breadth;
+  const bNum = $("breadthNum");
+  if(bNum.textContent === "—") bNum.textContent = t.breadth; else setNum(bNum, t.breadth);
   $("breadthTh").textContent = "门槛 ≥ "+t.threshold;
   const box=$("breadthBox");
-  box.className = "breadth-box " + (t.triggered?"bid-ok":"bid-no");
+  box.className = "gauge " + (t.triggered?"is-hot":"");
   const act=$("actionText");
   act.textContent = t.action;
-  act.className = "action " + (t.triggered?"act-ok":"act-no");
+  act.className = "conclusion " + (t.triggered?"act-ok":"act-no");
   $("mDate").textContent = t.date;
   $("mUpd").textContent = (t.updated_at||"").replace("T"," ");
   $("mBias").textContent = fmt(t.bias_only);
   $("mTotal").textContent = fmt(t.stocks_total);
+  const lg=$("lgTh"); if(lg) lg.textContent = t.threshold;
 
   // 候选股
   const cb=$("candBox");
-  $("tagCand").textContent = t.triggered ? t.candidates.length+" 只" : "仅达标时显示";
+  $("tagCand").textContent = t.triggered ? t.candidates.length+" 只"
+                            : (t.candidates.length ? "未达标 · 仅供参考" : "仅达标时显示");
   if(!t.candidates.length){
     cb.innerHTML = t.triggered
-      ? '<div class="empty">达标但无符合条件的个股（极少见）。</div>'
-      : '<div class="empty">广度未达标，今天不用看个股。</div>';
+      ? '<div class="empty"><span class="empty-mark">✓</span>'+
+        '<p class="empty-title">达标，但没有符合条件的个股</p>'+
+        '<p class="empty-note">极少见。可到「任务中心」跑一次「盘前任务」看更细的清单。</p></div>'
+      : '<div class="empty"><span class="empty-mark">✓</span>'+
+        '<p class="empty-title">广度未达标，今天不用看个股</p>'+
+        '<p class="empty-note">空仓等待是策略的一部分 —— 机会一年只有几次。</p></div>';
   }else{
-    // 用 .tbl-scroll 包一层：窄屏时可横向滚动，不会把文字挤掉
-    let h='<div class="tbl-scroll"><table class="cand"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
-          '<th>换手%</th><th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
+    // 未达标却仍有候选股时，必须明确说清「只是数据，不要照着买」
+    const caution = t.triggered ? ''
+      : '<p class="tbl-hint" style="color:var(--warn)">⚠ 广度未达门槛，以下仅为数据观察，<b>不建议操作</b>。</p>';
+    let h = caution + '<div class="tbl-scroll"><table class="cand"><thead><tr>'+
+      '<th>代码</th><th>名称</th><th>现价</th><th>BIAS</th><th>换手%</th>'+
+      '<th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
     for(const c of t.candidates){
       const cls = (c.chg5d||0)<0 ? "down" : "up";
       // 各字段都可能为 null（数据缺失），统一用 fmt() 兜底，避免 toFixed 抛错
-      h+=`<tr><td>${c.code}</td><td>${c.name||""}</td>`+
-         `<td class="num">${fmt(c.close!=null?(+c.close).toFixed(2):null)}</td>`+
-         `<td class="num down">${fmt(c.bias!=null?(+c.bias).toFixed(2):null)}</td>`+
-         `<td class="num">${fmt(c.turnover_pct!=null?(+c.turnover_pct).toFixed(2):null)}</td>`+
-         `<td class="num">${fmt(c.vol_ratio!=null?(+c.vol_ratio).toFixed(2):null)}</td>`+
-         `<td class="num ${cls}">${fmt(c.chg5d!=null?(+c.chg5d).toFixed(2):null)}</td>`+
-         `<td class="num">${c.amount!=null?(c.amount/1e8).toFixed(2):"—"}</td></tr>`;
+      h+='<tr>'+
+         `<td class="code" data-label="代码">${esc(c.code)}</td>`+
+         `<td data-label="名称">${esc(c.name||"")}</td>`+
+         `<td class="num" data-label="现价">${fmt(c.close!=null?(+c.close).toFixed(2):null)}</td>`+
+         `<td class="num down" data-label="BIAS">${fmt(c.bias!=null?(+c.bias).toFixed(2):null)}</td>`+
+         `<td class="num" data-label="换手%">${fmt(c.turnover_pct!=null?(+c.turnover_pct).toFixed(2):null)}</td>`+
+         `<td class="num" data-label="量比">${fmt(c.vol_ratio!=null?(+c.vol_ratio).toFixed(2):null)}</td>`+
+         `<td class="num ${cls}" data-label="近5日%">${fmt(c.chg5d!=null?((+c.chg5d>=0?"+":"")+(+c.chg5d).toFixed(2)):null)}</td>`+
+         `<td class="num" data-label="成交额(亿)">${c.amount!=null?(c.amount/1e8).toFixed(2):"—"}</td></tr>`;
     }
     cb.innerHTML=h+"</tbody></table></div>";
   }
 }
 
-let LAST_HIST=null, LAST_TH=50;
 async function loadHistory(){
   const d=await jget("/api/history?days=250");
   LAST_HIST=d.rows; LAST_TH=d.threshold;
+  const lg=$("lgTh"); if(lg) lg.textContent = d.threshold;
   drawChart(LAST_HIST, LAST_TH);
 }
 window.addEventListener("resize", ()=>{ if(LAST_HIST) drawChart(LAST_HIST, LAST_TH); });
 
 function drawChart(rows, th){
   const cv=$("chart"), ctx=cv.getContext("2d");
-  // 高清适配：按实际显示尺寸 × 设备像素比设置画布
+  // 高清适配：按容器实际尺寸 × 设备像素比设置画布；尺寸由 CSS 控制，这里只画
   const dpr = window.devicePixelRatio || 1;
   const cssW = cv.parentElement.clientWidth || 1020;
-  const cssH = 250;
-  cv.width = cssW * dpr; cv.height = cssH * dpr;
-  cv.style.width = cssW + "px"; cv.style.height = cssH + "px";
+  const cssH = cv.parentElement.clientHeight || 250;
+  cv.width = Math.round(cssW*dpr); cv.height = Math.round(cssH*dpr);
   ctx.setTransform(dpr,0,0,dpr,0,0);
   const W=cssW, H=cssH, pl=44, pr=14, pt=16, pb=26;
   ctx.clearRect(0,0,W,H);
-  if(!rows||!rows.length){ ctx.fillStyle="#8b96ad";ctx.font="13px sans-serif";
-    ctx.fillText("暂无历史数据",W/2-40,H/2); return; }
+  // 颜色全部取自主题令牌，深浅色切换后重画即可自动跟随
+  const cGrid=cssVar("--grid"), cAxis=cssVar("--ink-3"),
+        cBar=cssVar("--brand"), cBarHot=cssVar("--up"),
+        cLine=cssVar("--brand"), cTh=cssVar("--warn");
+  ctx.font='11px ui-monospace,"Cascadia Mono",Consolas,monospace';
+  if(!rows||!rows.length){
+    ctx.fillStyle=cAxis; ctx.textAlign="center";
+    ctx.fillText("暂无历史数据", W/2, H/2); ctx.textAlign="left"; return; }
   const vals=rows.map(r=>r.breadth);
   const maxV=Math.max(th*1.4, ...vals, 10);
   const n=rows.length;
@@ -348,47 +773,53 @@ function drawChart(rows, th){
   const Y=v=> H-pb - (H-pt-pb) * (v/maxV);
 
   // 网格
-  ctx.strokeStyle="#eef1f7"; ctx.fillStyle="#8b96ad"; ctx.font="11px sans-serif"; ctx.lineWidth=1;
+  ctx.strokeStyle=cGrid; ctx.fillStyle=cAxis; ctx.lineWidth=1;
   for(let k=0;k<=4;k++){
     const v=maxV*k/4, y=Y(v);
     ctx.beginPath();ctx.moveTo(pl,y);ctx.lineTo(W-pr,y);ctx.stroke();
-    ctx.fillText(Math.round(v), 6, y+4);
+    ctx.textAlign="right"; ctx.fillText(String(Math.round(v)), pl-8, y+4);
   }
+  ctx.textAlign="left";
   // 门槛线
   const yth=Y(th);
-  ctx.strokeStyle="#f59e0b"; ctx.setLineDash([6,4]); ctx.lineWidth=1.6;
+  ctx.strokeStyle=cTh; ctx.setLineDash([6,4]); ctx.lineWidth=1.6;
   ctx.beginPath();ctx.moveTo(pl,yth);ctx.lineTo(W-pr,yth);ctx.stroke(); ctx.setLineDash([]);
-  ctx.fillStyle="#b45309"; ctx.font="11px sans-serif";
-  ctx.fillText("门槛 "+th, W-pr-52, yth-5);
+  ctx.fillStyle=cTh;
+  ctx.fillText("门槛 "+th, Math.max(pl, W-pr-64), yth-6);
 
   // 柱
   const bw=Math.max(1.2,(W-pl-pr)/n*0.66);
   for(let i=0;i<n;i++){
     const v=vals[i], x=X(i), y=Y(v);
-    ctx.fillStyle = v>=th ? "#d92b2b" : "#9db6ff";
+    ctx.fillStyle = v>=th ? cBarHot : cBar;
+    ctx.globalAlpha = v>=th ? 1 : .5;
     ctx.fillRect(x-bw/2, y, bw, H-pb-y);
   }
+  ctx.globalAlpha = 1;
   // 折线
-  ctx.strokeStyle="#2f6bff"; ctx.lineWidth=1.4; ctx.beginPath();
+  ctx.strokeStyle=cLine; ctx.lineWidth=1.5; ctx.beginPath();
   for(let i=0;i<n;i++){ const x=X(i),y=Y(vals[i]); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
   ctx.stroke();
 
   // x 轴日期
-  ctx.fillStyle="#8b96ad"; ctx.font="11px sans-serif";
+  ctx.fillStyle=cAxis;
+  ctx.textAlign="center";
   [0, Math.floor(n/2), n-1].forEach(i=>{
     if(i<0||i>=n) return;
-    const t=rows[i].date.slice(2);
-    ctx.fillText(t, Math.min(Math.max(X(i)-16, pl), W-pr-34), H-8);
+    const t=String(rows[i].date).slice(2);
+    ctx.fillText(t, Math.min(Math.max(X(i), pl+18), W-pr-18), H-8);
   });
+  ctx.textAlign="left";
 }
 
 /* ============ 持仓表格（持仓卡 / 任务结果 共用） ============ */
-/* 固定列宽，让「提示」列能换行而不是把表格撑爆；外层 .tbl-scroll 保证窄屏可横向滚动、不裁字。 */
+/* 固定列宽，让「提示」列能换行而不是把表格撑爆；外层 .tbl-scroll 保证窄屏可滚动、不裁字。
+   窄屏时由 CSS 依据 data-label 把这些行转成「卡片」，所以每个 td 都要带标签。 */
 const HOLD_COLS='<colgroup>'+
-  '<col style="width:70px"><col style="width:106px"><col style="width:88px">'+
-  '<col style="width:62px"><col style="width:62px"><col style="width:66px">'+
-  '<col style="width:66px"><col style="width:98px"><col style="width:76px">'+
-  '<col><col style="width:52px"></colgroup>';
+  '<col style="width:74px"><col style="width:108px"><col style="width:92px">'+
+  '<col style="width:66px"><col style="width:66px"><col style="width:70px">'+
+  '<col style="width:70px"><col style="width:104px"><col style="width:80px">'+
+  '<col><col style="width:56px"></colgroup>';
 
 // 价格类统一 2 位小数（原来用 round(,3) 会显示 1291.702 这种噪声）
 const n2 = v => (v==null||isNaN(v)) ? "—" : (+v).toFixed(2);
@@ -411,19 +842,23 @@ function holdTable(rows, maxHold, withDel){
       ? tips.map(a=>'<span class="alert-pill '+lvCls(lv)+'">'+esc(a)+'</span>').join('')
       : '';
     const tp=(x.tp1_price==null&&x.tp2_price==null)?'—':n2(x.tp1_price)+" / "+n2(x.tp2_price);
-    h+='<tr><td>'+esc(x.code)+'</td>'+
-       '<td class="l nm" title="'+esc(x.name||'')+'">'+esc(x.name||'')+'</td>'+
-       '<td>'+esc(x.buy_date)+'</td>'+
-       '<td class="num">'+n2(x.buy_price)+'</td>'+
-       '<td class="num">'+n2(x.last)+'</td>'+
-       '<td class="num">'+pnl+'</td>'+
-       '<td class="num">'+n2(x.stop_price)+'</td>'+
-       '<td class="num">'+tp+'</td>'+
-       '<td class="num'+(over?' days-over':'')+'">'+(x.days_held||0)+
+    h+='<tr>'+
+       '<td class="code" data-label="代码">'+esc(x.code)+'</td>'+
+       '<td class="l nm" data-label="名称" title="'+esc(x.name||'')+'">'+esc(x.name||'')+'</td>'+
+       '<td data-label="买入日">'+esc(x.buy_date)+'</td>'+
+       '<td class="num" data-label="买入价">'+n2(x.buy_price)+'</td>'+
+       '<td class="num" data-label="最新价">'+n2(x.last)+'</td>'+
+       '<td class="num" data-label="盈亏%">'+pnl+'</td>'+
+       '<td class="num" data-label="止损线">'+n2(x.stop_price)+'</td>'+
+       '<td class="num" data-label="止盈线">'+tp+'</td>'+
+       '<td class="num'+(over?' days-over':'')+'" data-label="持有日">'+(x.days_held||0)+
          (over?'<span class="ovt">超期</span>':'')+'</td>'+
-       '<td class="tip"><span class="alert-pill '+lvCls(x.level)+'">'+esc(x.action||"持有")+'</span>'+
+       '<td class="tip" data-label="提示">'+
+         '<span class="alert-pill '+lvCls(x.level)+'">'+esc(x.action||"持有")+'</span>'+
          tipHtml+'</td>'+
-       '<td>'+((withDel&&x.id!=null)?'<button class="del" onclick="delHolding('+x.id+')">删除</button>':'')+'</td></tr>';
+       '<td class="act">'+((withDel&&x.id!=null)
+          ?'<button class="del" onclick="delHolding('+x.id+')" aria-label="删除这条持仓">删除</button>':'')+'</td>'+
+       '</tr>';
   }
   return h+'</tbody></table></div>';
 }
@@ -433,11 +868,16 @@ async function loadHoldings(){
   const box=$("holdBox");
   // 卡片标题里的止损/止盈/持有上限跟随 strategy_config.json，改配置后刷新即变
   if(d.exit){
-    const e=d.exit, sg=v=>v>=0?"+":""; 
+    const e=d.exit, sg=v=>v>=0?"+":"";
     $("tagHold").textContent="止损 "+sg(e.stop_pct)+e.stop_pct+"% · 止盈 "
       +sg(e.tp1_pct)+e.tp1_pct+"%/"+sg(e.tp2_pct)+e.tp2_pct+"% · 最长 "+e.max_hold_days+" 日";
   }
-  if(!d.holdings.length){ box.innerHTML='<div class="empty">还没有持仓记录。</div>'; return; }
+  if(!d.holdings.length){
+    box.innerHTML='<div class="empty"><span class="empty-mark">＋</span>'+
+      '<p class="empty-title">还没有持仓记录</p>'+
+      '<p class="empty-note">买入后在上面登记「代码 / 买入日期 / 买入价」，页面会自动帮你盯止损与止盈。</p></div>';
+    return;
+  }
   box.innerHTML=holdTable(d.holdings, d.max_hold_days, true);
 }
 
@@ -484,21 +924,22 @@ function renderBlocks(blocks){
     if(b.kind==='text'){
       h+='<div class="blk-txt">'+esc(b.text||'').replace(/\n/g,'<br>')+'</div>';
     }else if(b.kind==='kv'){
-      h+='<table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>';
+      h+='<div class="tbl-scroll"><table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>';
       for(const r of rows) h+='<tr><td>'+esc(r.k)+'</td><td class="num">'+esc(r.v)+'</td></tr>';
-      h+='</tbody></table>';
+      h+='</tbody></table></div>';
     }else if(b.kind==='candidates'){
       h+='<div class="tbl-scroll"><table class="cand"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>BIAS</th>'+
          '<th>换手%</th><th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
       for(const c of rows){
         // close 也可能为 null —— 直接 toFixed 会抛错，导致整块任务结果渲染失败，统一 fmt() 兜底
-        h+='<tr><td>'+esc(c.code)+'</td><td>'+esc(c.name||'')+'</td>'+
-           '<td class="num">'+fmt(c.close!=null?(+c.close).toFixed(2):null)+'</td>'+
-           '<td class="num down">'+(c.bias!=null?(+c.bias).toFixed(2):'—')+'</td>'+
-           '<td class="num">'+(c.turnover_pct!=null?(+c.turnover_pct).toFixed(2):'—')+'</td>'+
-           '<td class="num">'+(c.vol_ratio!=null?(+c.vol_ratio).toFixed(2):'—')+'</td>'+
-           '<td class="num">'+(c.chg5d!=null?(+c.chg5d).toFixed(2):'—')+'</td>'+
-           '<td class="num">'+(c.amount!=null?(c.amount/1e8).toFixed(2):'—')+'</td></tr>';
+        h+='<tr><td class="code" data-label="代码">'+esc(c.code)+'</td>'+
+           '<td data-label="名称">'+esc(c.name||'')+'</td>'+
+           '<td class="num" data-label="现价">'+fmt(c.close!=null?(+c.close).toFixed(2):null)+'</td>'+
+           '<td class="num down" data-label="BIAS">'+(c.bias!=null?(+c.bias).toFixed(2):'—')+'</td>'+
+           '<td class="num" data-label="换手%">'+(c.turnover_pct!=null?(+c.turnover_pct).toFixed(2):'—')+'</td>'+
+           '<td class="num" data-label="量比">'+(c.vol_ratio!=null?(+c.vol_ratio).toFixed(2):'—')+'</td>'+
+           '<td class="num" data-label="近5日%">'+(c.chg5d!=null?((+c.chg5d>=0?"+":"")+(+c.chg5d).toFixed(2)):'—')+'</td>'+
+           '<td class="num" data-label="成交额(亿)">'+(c.amount!=null?(c.amount/1e8).toFixed(2):'—')+'</td></tr>';
       }
       h+='</tbody></table></div>';
     }else if(b.kind==='holdings'){
@@ -533,22 +974,22 @@ function renderTasks(data){
       ? Math.round(t.progress.done/t.progress.total*100) : (running?3:0);
 
     h+='<div class="task '+(running?'running':'')+'" data-key="'+t.key+'">'+
-       '<div class="task-head"><div style="flex:1;min-width:260px">'+
-         '<div class="task-title"><span class="ico">'+t.icon+'</span>'+esc(t.name)+
+       '<div class="task-head"><div style="flex:1;min-width:240px">'+
+         '<div class="task-title"><span class="ico" aria-hidden="true">'+t.icon+'</span>'+esc(t.name)+
            ' <span class="chip '+(t.enabled?'on':'off')+'">'+
            (t.enabled?('定时 '+esc(t.at_time)):'未开启定时')+'</span></div>'+
          '<div class="task-desc">'+esc(t.desc)+'</div>'+
          '<div class="task-more" id="more-'+t.key+'">'+esc(t.long_desc||'')+'</div>'+
        '</div>'+
-       '<button class="btn sm ghost2" onclick="toggleMore(\''+t.key+'\')">说明</button></div>'+
+       '<button class="btn btn-sm btn-ghost" onclick="toggleMore(\''+t.key+'\')">说明</button></div>'+
 
        '<div class="task-row">'+
-         '<button class="btn sm primary" onclick="runTask(\''+t.key+'\')" '+
+         '<button class="btn btn-sm btn-primary" onclick="runTask(\''+t.key+'\')" '+
            ((running||busy)?'disabled':'')+'>▶ 立即执行</button>'+
          '<label class="sw"><input type="checkbox" id="en-'+t.key+'" '+(t.enabled?'checked':'')+'> 定时执行</label>'+
-         '<input type="time" id="tm-'+t.key+'" value="'+esc(t.at_time)+'">'+
+         '<input type="time" id="tm-'+t.key+'" value="'+esc(t.at_time)+'" aria-label="定时时间">'+
          '<span class="mini">星期</span><div class="days">'+dayBox+'</div>'+
-         '<button class="btn sm ghost2" onclick="saveSchedule(\''+t.key+'\')">保存定时</button>'+
+         '<button class="btn btn-sm btn-ghost" onclick="saveSchedule(\''+t.key+'\')">保存定时</button>'+
        '</div>'+
 
        '<div class="task-prog '+(running?'show':'')+'" id="prog-'+t.key+'">'+
