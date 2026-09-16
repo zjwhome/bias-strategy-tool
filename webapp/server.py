@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime
 
@@ -50,6 +51,78 @@ app = Flask(__name__, static_folder=None)
 UPDATE_STATE = {"running": False, "last": None, "msg": "尚未更新"}
 
 
+# ================================================================== 数据新鲜度探测
+# ★ 要解决的问题：
+#   本工具的全市场日线来自**新浪**（akshare 的 stock_zh_a_daily）。实测发现，
+#   当天收盘后新浪并不会立刻发布当日 K 线 —— 2026-09-16 16:20 查，新浪的两个
+#   独立接口（json_v2 日K、hisdata）最后一行都还停在 2026-09-15，而同一天腾讯
+#   的日线接口已经有 09-16 了。
+#   于是「跑完盘后任务，页面上还是昨天的数据」——用户会以为工具坏了。
+#
+#   这里用一个**独立数据源**（腾讯的上证指数日线）来判断「数据源目前最新可得
+#   的交易日」，前端就能明确告诉用户：「不是你没跑，是数据源还没出数」。
+#
+#   设计原则：拿不到就返回 None（宁可不提示，也绝不误报）。
+_EXPECT = {"at": 0.0, "date": None, "fetching": False}
+_EXPECT_TTL = 600                     # 10 分钟缓存，避免每次轮询都出网
+_EXPECT_URL = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+               "?param=sh000001,day,,,2,qfq")
+
+
+def _fetch_expected_date():
+    """查腾讯上证指数日线的最后一根 —— 即数据源当前最新可得的交易日。"""
+    import requests
+    r = requests.get(_EXPECT_URL, timeout=6,
+                     headers={"User-Agent": "Mozilla/5.0"})
+    node = (r.json().get("data") or {}).get("sh000001") or {}
+    for k in ("qfqday", "day"):
+        rows = node.get(k)
+        if rows:
+            return str(rows[-1][0])[:10]
+    return None
+
+
+def expected_trade_date():
+    """返回「数据源目前最新可得的交易日」，探测失败或首次未就绪时返回 None。
+
+    ★ 后台线程预热 + 10 分钟缓存：绝不让网络请求卡住 /api/status（它每 8 秒被
+      前端轮询一次）。第一次调用返回 None、8 秒后的下一次轮询就能拿到结果。
+    """
+    fresh = (time.time() - _EXPECT["at"]) < _EXPECT_TTL
+    if fresh or _EXPECT["fetching"]:
+        return _EXPECT["date"]
+    _EXPECT["at"] = time.time()          # 先占位，避免轮询时并发重复出网
+    _EXPECT["fetching"] = True
+
+    def _warm():
+        try:
+            got = _fetch_expected_date()
+            if got:
+                _EXPECT["date"] = got
+        except Exception:
+            pass                          # 网络失败：保留上一次的值（可能为 None）
+        finally:
+            _EXPECT["fetching"] = False
+
+    threading.Thread(target=_warm, daemon=True).start()
+    return _EXPECT["date"]
+
+
+def staleness(last_date):
+    """对比「库里已有的最新交易日」和「数据源最新可得的交易日」。
+
+    返回 (stale, expected, hint)。last_date 为空或探测不到时一律不告警。
+    """
+    exp = expected_trade_date()
+    if not exp or not last_date or str(last_date) >= exp:
+        return False, exp, ""
+    hint = (f"数据源（新浪财经）目前只发布到 <b>{last_date}</b>，还没有 "
+            f"<b>{exp}</b> 的行情，所以本次更新用的是 {last_date} 的数据。"
+            f"<br>新浪的当日日线一般要等到<b>当天傍晚</b>才出 —— 稍晚一点"
+            f"再跑一次「盘后任务」，数据就会前进到 {exp}。")
+    return True, exp, hint
+
+
 # ------------------------------------------------------------------ 静态页面
 @app.route("/")
 def index():
@@ -65,16 +138,24 @@ def static_files(fname):
 @app.get("/api/status")
 def api_status():
     d = db.get_daily()
+    last_date = d["date"] if d else None
     running = [k for k in tasks.TASK_KEYS if tasks.STATE[k]["running"]]
+    stale, exp, hint = staleness(last_date)
     return jsonify(dict(
         ok=True,
-        last_date=d["date"] if d else None,
+        last_date=last_date,
         updated_at=d["updated_at"] if d else None,
         breadth=d["breadth"] if d else None,
         threshold=core.CFG["breadth_threshold"],
         updating=UPDATE_STATE["running"],
         update_msg=UPDATE_STATE["msg"],
         running_tasks=running,
+        # ★ 数据版本号：前端靠它判断"数据变了没有"，变了就整页刷新四张卡片。
+        #   只要 save_daily 写过一次，updated_at 就会变（见 db.save_daily）。
+        data_version=f"{last_date}|{d['updated_at']}" if d else "empty",
+        expected_date=exp,
+        stale=stale,
+        stale_hint=hint,
         server_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     ))
 
@@ -85,6 +166,7 @@ def api_today():
     if not d:
         return jsonify(dict(ok=False, msg="尚无数据，请先到「任务中心」跑一次「盘后任务」。"))
     cands = db.get_candidates(d["date"])
+    stale, exp, hint = staleness(d["date"])
     return jsonify(dict(
         ok=True,
         date=d["date"],
@@ -94,6 +176,9 @@ def api_today():
         threshold=d["threshold"],
         triggered=bool(d["triggered"]),
         updated_at=d["updated_at"],
+        expected_date=exp,
+        stale=stale,
+        stale_hint=hint,
         action=("✅ 达标：可以按下方候选股出手" if d["triggered"]
                 else f"⛔ 未达标：今天不动手（需广度 ≥ {d['threshold']}）"),
         candidates=cands,
@@ -259,16 +344,23 @@ def api_task_result(key, run_id):
 
 
 # ------------------------------------------------------------------ 兼容：网站内「更新数据」按钮
+_UPDATE_LOCK = threading.Lock()
+
+
 @app.post("/api/update")
 def api_update():
     """等价于执行一次「盘后任务」（用户手动触发）"""
-    if UPDATE_STATE["running"] or any(tasks.STATE[k]["running"] for k in tasks.TASK_KEYS):
-        return jsonify(dict(ok=False, msg="已有任务在运行中"))
-    no_fetch = request.args.get("no_fetch", "0") in ("1", "true", "yes")
-    limit = int(request.args.get("limit", 0) or 0)
+    # ★ running 必须在**同步路径**里置位，不能放到子线程里。
+    #   曾经写成在线程内 `UPDATE_STATE.update(running=True)`，
+    #   于是本函数返回、而线程还没被调度的那一瞬间，/api/status 仍回报
+    #   updating=False —— 前端的轮询一旦落在这一瞬，就会立刻判定「已完成」、
+    #   停掉轮询并去 loadAll()（拿到的是旧数据），此后这个页面再也不会自动刷新。
+    with _UPDATE_LOCK:
+        if UPDATE_STATE["running"] or any(tasks.STATE[k]["running"] for k in tasks.TASK_KEYS):
+            return jsonify(dict(ok=False, msg="已有任务在运行中"))
+        UPDATE_STATE.update(running=True, msg="正在更新数据…")
 
     def work():
-        UPDATE_STATE.update(running=True, msg="正在更新数据…")
         try:
             tasks.run_task("postmarket", "manual",
                            log=lambda s: UPDATE_STATE.update(msg=str(s)))
@@ -280,7 +372,11 @@ def api_update():
         finally:
             UPDATE_STATE["running"] = False
 
-    threading.Thread(target=work, daemon=True).start()
+    try:
+        threading.Thread(target=work, daemon=True).start()
+    except Exception as e:                      # 线程都起不来 → 必须把 running 放回去
+        UPDATE_STATE.update(running=False, msg=f"更新失败：{e}")
+        return jsonify(dict(ok=False, msg="无法启动更新线程")), 500
     return jsonify(dict(ok=True, msg="已开始后台更新"))
 
 

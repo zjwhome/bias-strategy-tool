@@ -339,6 +339,21 @@ table.hold .days-over{color:var(--warn);font-weight:700}
 .banner.err{background:var(--up-soft);border-color:var(--up-ring);color:var(--up)}
 .banner b{font-weight:700}
 
+/* 数据源尚未发布当日行情时的说明块。
+   ★ 正文用 --ink-2 而不是 --warn：--warn 在 --warn-soft 底上只有约 3:1，
+     达不到正文 4.5:1。警示感交给左侧 4px 色条和底色，正文保证可读。 */
+.stale{display:none;margin-top:var(--s-4);
+  border:1px solid var(--line);border-left:4px solid var(--warn);
+  background:var(--warn-soft);border-radius:var(--r-md);
+  padding:var(--s-3) var(--s-4);font-size:var(--t-sm);
+  line-height:1.85;color:var(--ink-2)}
+.stale.show{display:block}
+.stale b{color:var(--ink);font-weight:700}
+/* 顶栏数据日期下面的一行轻量提示，不占额外空间 */
+.hdr-meta .warnmark{display:none;margin-top:2px;font-size:var(--t-xs);
+  color:var(--warn);font-weight:600}
+.hdr-meta .warnmark.show{display:block}
+
 /* ==========================================================================
    11 · 图表
    ========================================================================== */
@@ -551,6 +566,8 @@ footer b{color:var(--ink-2)}
         </div>
       </div>
     </div>
+    <!-- 数据源还没发布当日行情时在这里说清楚，默认隐藏 -->
+    <div class="stale" id="dataWarn" role="status" aria-live="polite"></div>
   </div>
 
   <!-- 任务中心 -->
@@ -602,6 +619,8 @@ footer b{color:var(--ink-2)}
 
   <footer>
     本工具仅提供数据参考，<b>不构成投资建议</b>。数据来源：新浪财经（本地缓存）。<br>
+    新浪的「当日」日线通常要到当天傍晚才发布；如果页面提示「数据源尚未发布」，
+    稍晚再跑一次「盘后任务」即可。<br>
     只在广度 ≥ 门槛（高胜率窗口）时出手；其余时间空仓等待，是策略的一部分。
   </footer>
 </div>
@@ -654,10 +673,21 @@ function setNum(el, to){
   })(t0);
 }
 
+let BAN_TIP=null;
 function showBanner(msg, type){
   const b=$("banner"); b.className="banner show "+(type||"info"); b.textContent=msg;
 }
-function hideBanner(){ $("banner").className="banner"; }
+function hideBanner(){
+  if(BAN_TIP){ clearTimeout(BAN_TIP); BAN_TIP=null; }
+  $("banner").className="banner";
+}
+/* 会自动消失的提示条。所有自动提示共用同一个计时器 —— 后一条提示会接管前一条，
+   不会出现「前一条的计时器到点，把后一条也一起关掉」这种错乱。 */
+function bannerAuto(msg, type, ms){
+  if(BAN_TIP){ clearTimeout(BAN_TIP); BAN_TIP=null; }
+  showBanner(msg, type);
+  BAN_TIP=setTimeout(()=>{ BAN_TIP=null; $("banner").className="banner"; }, ms||8000);
+}
 
 async function jget(url){ const r=await fetch(url); return r.json(); }
 async function jpost(url, body, method){
@@ -667,12 +697,79 @@ async function jpost(url, body, method){
 }
 
 async function loadStatus(){
+  try{ applyStatus(await jget("/api/status")); }
+  catch(e){ $("hRight").textContent="后端未连接"; }
+}
+
+/* 「服务状态 → 界面」的唯一入口。
+   顶栏数据日期、数据源新鲜度提示、「更新数据」按钮的可用态，全部从这一份
+   状态推导 —— 避免多处各写一套导致状态互相打架。 */
+let CUR_STALE=null;
+function applyStatus(s){
+  const stale = !!s.stale;
+  const warn = (stale && s.expected_date)
+    ? `<span class="warnmark show">⚠ 数据源尚未发布 ${esc(s.expected_date)} 行情</span>` : "";
+  $("hRight").innerHTML = (s.last_date
+    ? `数据日期 <b>${esc(s.last_date)}</b><br>更新于 ${esc((s.updated_at||"").replace("T"," "))}`
+    : "尚无数据") + warn;
+  // ★ 按钮跟着「真实的运行态」走：不论是本页点的、控制台点的，还是定时器触发的
+  setUpdateBtn(!!s.updating || (s.running_tasks||[]).length>0);
+  /* ★「数据源发布 / 未发布」这个状态本身也要驱动界面。
+     冷启动时后端还在后台探测 expected_date，第一轮 /api/status 拿不到，
+     所以「未发布」提示常常是在随后某一轮轮询才浮现的 —— 那时卡片里的说明块
+     必须跟着出现，不能一直等到下次数据变化。 */
+  if(CUR_STALE===null){ CUR_STALE=stale; }          // 首轮只记基线（紧接着的 loadAll 会渲染）
+  else if(CUR_STALE!==stale){ CUR_STALE=stale; refreshDataWarn(); }
+  return s;
+}
+
+/* 只刷新「数据源未发布」这一处，不重绘整张卡片、也不动提示条 */
+async function refreshDataWarn(){
   try{
-    const s=await jget("/api/status");
-    $("hRight").innerHTML = s.last_date
-      ? `数据日期 <b>${s.last_date}</b><br>更新于 ${(s.updated_at||"").replace("T"," ")}`
-      : "尚无数据";
-  }catch(e){ $("hRight").textContent="后端未连接"; }
+    const t=await jget("/api/today");
+    if(t.ok){
+      setDataWarn(t);
+      $("tagDate").textContent = t.stale ? (t.date+" · 数据源未更新") : t.date;
+    }else{ setDataWarn(null); }
+  }catch(e){}
+}
+
+function setUpdateBtn(busy){
+  const b=$("btnUpdate"); if(!b) return;
+  if(b.disabled!==busy) b.disabled=busy;
+  const txt = busy ? "更新中…" : "更新数据";
+  if(b.textContent!==txt) b.textContent=txt;
+}
+
+/* ============ 常驻「数据版本」监视器 ============
+   ★ 这是「任务跑完，四张卡片自动更新」的关键。
+   只靠任务中心自己的进度轮询是不够的：任务也可能由控制台窗口或定时器触发，
+   那种情况下本页毫不知情，卡片就一直是旧的。改成盯 /api/status 的 data_version
+   （后端每次写库都会刷新它），那么无论更新是谁触发的，跑完这里都会整页刷新。 */
+let DATA_VER=null, VER_SEEN=false, VER_BUSY=false;
+function startStatusWatch(){
+  setInterval(async()=>{
+    let s; try{ s=await jget("/api/status"); }catch(e){ return; }
+    applyStatus(s);
+    if(!VER_SEEN){ VER_SEEN=true; DATA_VER=s.data_version; return; }   // 首轮只记基线
+    if(s.data_version===DATA_VER || VER_BUSY) return;
+    DATA_VER=s.data_version;
+    VER_BUSY=true;
+    try{
+      await loadAll();
+      bannerAuto(`数据已更新到 ${s.last_date||""}，本页四张卡片已自动刷新。`,"info",8000);
+    }catch(e){} finally{ VER_BUSY=false; }
+  }, 8000);
+}
+
+/* 数据源还没发布当日行情时，在「今日广度」卡片里把话说清楚。
+   ★ 否则用户看到的是「任务跑完了，日期却还是昨天」，很容易以为工具坏了。
+   注：stale_hint 是本工具后端自己生成的 HTML（含 <b>/<br>），不是外部输入。 */
+function setDataWarn(t){
+  const w=$("dataWarn"); if(!w) return;
+  const on = !!(t && t.stale && t.stale_hint);
+  w.innerHTML = on ? "<b>⏳ 数据源还没发布当日行情</b> —— " + t.stale_hint : "";
+  w.classList.toggle("show", on);
 }
 
 async function loadToday(){
@@ -686,10 +783,12 @@ async function loadToday(){
     act.className="conclusion act-no";
     $("breadthBox").className="gauge";
     $("tagCand").textContent="仅达标时显示";
+    setDataWarn(null);
     return;
   }
   hideBanner();
-  $("tagDate").textContent = t.date;
+  $("tagDate").textContent = t.stale ? (t.date+" · 数据源未更新") : t.date;
+  setDataWarn(t);
   const bNum = $("breadthNum");
   if(bNum.textContent === "—") bNum.textContent = t.breadth; else setNum(bNum, t.breadth);
   $("breadthTh").textContent = "门槛 ≥ "+t.threshold;
@@ -899,14 +998,14 @@ async function delHolding(id){
   await jpost("/api/holdings/"+id,null,"DELETE"); loadHoldings();
 }
 async function triggerUpdate(){
-  const b=$("btnUpdate"); b.disabled=true; b.textContent="更新中…";
-  showBanner("已开始更新数据，全市场约需 15–25 分钟，可关掉页面稍后再来。","info");
-  await jpost("/api/update");
-  const timer=setInterval(async()=>{
-    const s=await jget("/api/status");
-    if(!s.updating){ clearInterval(timer); b.disabled=false; b.textContent="更新数据";
-      hideBanner(); loadAll(); }
-  },5000);
+  setUpdateBtn(true);
+  showBanner("已开始更新数据，全市场约需 15–25 分钟。跑完本页会自动刷新，也可以关掉页面稍后再来。","info");
+  let r;
+  try{ r=await jpost("/api/update"); }
+  catch(e){ r={ok:false, msg:"请求失败，请确认「控制台」里工具网站还在运行中。"}; }
+  if(!r.ok){ setUpdateBtn(false); showBanner(r.msg||"无法开始更新。","err"); }
+  // ★ 不再需要自己的轮询：常驻的 startStatusWatch() 会盯住 data_version，
+  //   数据一写完就自动刷新四张卡片；按钮的「更新中…」也由它按真实运行态收回。
 }
 
 /* ============ 任务中心 ============ */
@@ -1072,6 +1171,9 @@ function startTaskPoll(){
       clearInterval(TASK_POLL); TASK_POLL=null;
       hideBanner();
       await loadTasks(); await loadAll();
+      // 数据真的变了时，startStatusWatch() 会紧跟一条更具体的提示
+      //（"数据已更新到 X"）；这里只是兜底确认，避免用户以为页面卡住了。
+      bannerAuto("任务已执行完成，四张卡片已按最新数据刷新。","info",12000);
     }
   },3000);
 }
@@ -1111,13 +1213,15 @@ $("btnAdd").onclick=addHolding;
 (async function boot(){
   let up=false;
   for(let i=0;i<60;i++){
-    try{ await jget("/api/status"); up=true; break; }catch(e){}
+    try{ applyStatus(await jget("/api/status")); up=true; break; }catch(e){}
     showBanner("正在等待后端服务启动…（请稍候）","info");
     await new Promise(r=>setTimeout(r,2000));
   }
   if(up){ hideBanner(); await loadAll(); }
   else { showBanner("连不上后端服务。请确认「控制台」里工具网站是运行中，然后刷新本页。","err"); }
-  setInterval(loadStatus, 60000);
+  // ★ 常驻监视数据版本：任何来源（本页 / 控制台 / 定时器）触发的更新，
+  //   跑完都会让本页四张卡片自动跟上，不再需要手动刷新页面。
+  startStatusWatch();
 })();
 </script>
 </body>
