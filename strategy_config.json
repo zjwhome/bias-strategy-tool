@@ -23,17 +23,57 @@
     "min_turnover_rate_pct": 1
   },
 
+  "board_scope": {
+    "note": "★ 用户明确要求：只做沪深主板，创业板/科创板/北交所一律不考虑。",
+    "main_board_only": true,
+    "main_board_prefixes": ["600", "601", "603", "605", "000", "001", "002", "003"],
+    "excluded": {
+      "创业板": ["300", "301"],
+      "科创板": ["688", "689"],
+      "北交所": ["4xx", "8xx", "9xx"]
+    },
+    "applies_to": "买入名单（盘后候选股、盘中参考清单）。信号广度仍按全市场口径统计，以保持与六年回测同一把尺子。",
+    "counts": {
+      "universe_total": 5017,
+      "main_board": 3051,
+      "chinext": 1362,
+      "star": 603,
+      "main_board_share_pct": 60.8
+    }
+  },
+
   "regime_gate": {
     "enabled": true,
     "note": "★ v2.0 核心升级：市场层择时总开关。此层不过关，后面全部不看。",
     "metric": "signal_breadth",
     "metric_definition": "当日全市场满足 [BIAS_24 < -15 且 当日成交量 >= 5日均量*1.5 且 Chg5D < 0] 的股票只数",
     "presets": {
-      "main": { "threshold": 50, "six_year_days": 22, "annual_opportunities": 3.7, "backtest_win_rate_pct": 85.6, "backtest_avg_ret_pct": 4.37, "backtest_pl_ratio": 4.81 },
-      "loose": { "threshold": 20, "six_year_days": 46, "annual_opportunities": 7.7, "backtest_win_rate_pct": 82.1, "backtest_avg_ret_pct": 3.78, "backtest_pl_ratio": 3.65 },
-      "aggressive": { "threshold": 100, "six_year_days": 15, "annual_opportunities": 2.5, "backtest_win_rate_pct": 87.8, "backtest_avg_ret_pct": 4.84, "backtest_pl_ratio": 6.48 }
+      "main": { "threshold": 50, "threshold_main_board": 30, "six_year_days": 22, "annual_opportunities": 3.7, "backtest_win_rate_pct": 85.6, "backtest_avg_ret_pct": 4.37, "backtest_pl_ratio": 4.81 },
+      "loose": { "threshold": 20, "threshold_main_board": 12, "six_year_days": 46, "annual_opportunities": 7.7, "backtest_win_rate_pct": 82.1, "backtest_avg_ret_pct": 3.78, "backtest_pl_ratio": 3.65 },
+      "aggressive": { "threshold": 100, "threshold_main_board": 60, "six_year_days": 15, "annual_opportunities": 2.5, "backtest_win_rate_pct": 87.8, "backtest_avg_ret_pct": 4.84, "backtest_pl_ratio": 6.48 }
     },
     "active_preset": "main",
+    "main_board_calibration": {
+      "note": "★ 门槛 50 是『全市场』口径（5017 只）。本工具只买沪深主板（3051 只，占 60.8%），若直接沿用 50，六年触发天数会从 21 天掉到 13 天，等于白白丢掉近四成机会。故按历史数据重新推导主板等效门槛。",
+      "method": "用本地全历史数据（8728 个交易日）逐日重算：全市场广度 vs 主板广度，在『触发天数对齐 21 天』的约束下扫描门槛 5~200。",
+      "ratio_median": 0.5,
+      "ratio_mean": 0.544,
+      "full_market_ge_50_days": 21,
+      "main_board_ge_50_days": 13,
+      "chosen": 30,
+      "chosen_days": 20,
+      "alternatives": { "25": 22, "20": 27, "15": 31 },
+      "conversion": "主板门槛 = round(全市场门槛 × 0.6)；50→30、20→12、100→60",
+      "supporting_fact": "全市场广度≥50 的 21 天里，主板口径最小 24 / 中位 77 / 最大 567，21 天全部 ≥20，19 天 ≥30，13 天 ≥50 —— 说明主板池虽小，恐慌日仍是同涨同跌，信息损失有限。"
+    },
+    "breadth_tiers_main_board": [
+      { "range": [1, 2], "meaning": "个股利空" },
+      { "range": [3, 10], "meaning": "小范围调整" },
+      { "range": [10, 25], "meaning": "板块级调整" },
+      { "range": [26, 50], "meaning": "市场级调整" },
+      { "range": [50, 150], "meaning": "系统性下跌" },
+      { "range": [150, null], "meaning": "全市场恐慌" }
+    ],
     "breadth_tiers": [
       { "range": [1, 5], "meaning": "个股利空", "I_avg_ret_pct": -1.01, "I_win_rate_pct": 49.9 },
       { "range": [6, 20], "meaning": "小范围调整", "I_avg_ret_pct": -0.21, "I_win_rate_pct": 56.4 },

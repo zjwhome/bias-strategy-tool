@@ -27,7 +27,9 @@ import time
 import socket
 import threading
 import glob
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutTimeout
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -63,6 +65,8 @@ DEFAULTS = dict(
     breadth_threshold=50,    # ★ 出手门槛
     workers=16,              # 并发线程
     retry=3,
+    main_board_only=True,    # ★ 用户只看沪深主板（见 board_scope）
+    breadth_threshold_main=30,   # 主板口径的等效门槛（历史推导：主板≥30 ≈ 全市场≥50，见 strategy_config.board_scope）
 )
 
 
@@ -89,12 +93,48 @@ def load_config() -> dict:
         th = rg.get("presets", {}).get(key, {}).get("threshold")
         if th:
             cfg["breadth_threshold"] = int(th)
+        bs = j.get("board_scope", {})
+        if bs.get("main_board_only") is not None:
+            cfg["main_board_only"] = bool(bs["main_board_only"])
+        tmm = (rg.get("presets", {}).get(key, {}) or {}).get("threshold_main_board")
+        if tmm:
+            cfg["breadth_threshold_main"] = int(tmm)
     except Exception as e:
         print(f"[config] 读取失败，使用默认值：{e}")
     return cfg
 
 
 CFG = load_config()
+
+
+# ------------------------------------------------------------------ 板块归属
+# ★ 用户明确要求：**只做沪深主板**，创业板 / 科创板 / 北交所一律不考虑。
+#   注意这里的定位：主板限定作用于「**买入名单**」（候选股、盘中参考清单）；
+#   而「信号广度」是市场级恐慌温度计，仍按全市场口径统计，
+#   这样才和六年回测（门槛 50 → 胜率 85.6%）保持同一把尺子。
+#   ★ 两套口径的区别见 memory/NOTES-ops.md 与 webapp/README 的说明。
+MB_PREFIXES = ("600", "601", "603", "605",      # 沪市主板
+               "000", "001", "002", "003")      # 深市主板（002/003 为原中小板，已并入主板）
+
+
+def board_of(code) -> str:
+    """股票代码 → 所属板块名称"""
+    c = str(code).zfill(6)
+    if c.startswith(("600", "601", "603", "605")):
+        return "沪市主板"
+    if c.startswith(("000", "001", "002", "003")):
+        return "深市主板"
+    if c.startswith(("300", "301")):
+        return "创业板"
+    if c.startswith(("688", "689")):
+        return "科创板"
+    if c.startswith(("4", "8", "9")):
+        return "北交所"
+    return "其它"
+
+
+def is_main_board(code) -> bool:
+    return str(code).zfill(6).startswith(MB_PREFIXES)
 
 
 # ------------------------------------------------------------------ 工具
@@ -363,27 +403,51 @@ def latest_trade_date(data: pd.DataFrame) -> pd.Timestamp:
 
 
 def calc_breadth(data: pd.DataFrame, date: pd.Timestamp | None = None) -> dict:
-    """计算指定交易日的信号广度"""
+    """计算指定交易日的信号广度。
+
+    ★ 同时给出两个口径：
+      · breadth        = 全市场（**择时用的就是它**，与六年回测同一把尺子）
+      · breadth_main   = 其中属于沪深主板的部分（＝用户真正可以买的池子）
+    """
     date = date or latest_trade_date(data)
     d = data[data["date"] == date]
     sig = d[signal_mask(d)]
     all_sig = d[d["bias"] <= CFG["bias_threshold"]]           # 仅乖离率条件，做参考
+    mb = sig["code"].map(is_main_board)
+    mb_all = all_sig["code"].map(is_main_board)
     th = CFG["breadth_threshold"]
     return dict(
         date=str(pd.Timestamp(date).date()),
         breadth=int(len(sig)),
         bias_only=int(len(all_sig)),
+        breadth_main=int(mb.sum()),
+        bias_only_main=int(mb_all.sum()),
         threshold=th,
         triggered=bool(len(sig) >= th),
         stocks_total=int(len(d)),
     )
 
 
-def pick_candidates(data: pd.DataFrame, date: pd.Timestamp | None = None, limit: int = 10) -> pd.DataFrame:
-    """按 BIAS 升序取候选股（跌得最狠的在前），并补上股票名称"""
+def signal_rows(data: pd.DataFrame, date: pd.Timestamp | None = None,
+                board_only: bool | None = None) -> pd.DataFrame:
+    """当日满足全部条件的股票（未排序、未截断）。board_only 默认取配置。"""
     date = date or latest_trade_date(data)
     d = data[data["date"] == date]
     sig = d[signal_mask(d)].copy()
+    if board_only is None:
+        board_only = bool(CFG.get("main_board_only", True))
+    if board_only and not sig.empty:
+        sig = sig[sig["code"].map(is_main_board)]
+    return sig
+
+
+def pick_candidates(data: pd.DataFrame, date: pd.Timestamp | None = None, limit: int = 10,
+                    board_only: bool | None = None) -> pd.DataFrame:
+    """按 BIAS 升序取候选股（跌得最狠的在前），并补上股票名称。
+
+    ★ 默认只保留沪深主板——用户明确「其他板不考虑」。想拿全市场名单就传 board_only=False。
+    """
+    sig = signal_rows(data, date, board_only)
     if sig.empty:
         return sig
     sig = sig.sort_values("bias").head(limit)
@@ -394,15 +458,19 @@ def pick_candidates(data: pd.DataFrame, date: pd.Timestamp | None = None, limit:
 
 
 def breadth_history(data: pd.DataFrame, days: int = 250) -> pd.DataFrame:
-    """历史广度序列（用于画曲线）：每个交易日的广度 + 仅乖离率命中数"""
+    """历史广度序列（用于画曲线）：每个交易日的广度 + 仅乖离率命中数 + 主板口径"""
     m = signal_mask(data)
     b_only = data["bias"] <= CFG["bias_threshold"]
+    mb = data["code"].map(is_main_board)
     hist = data.groupby("date").size().rename("total").to_frame()
     br = data[m].groupby("date").size().rename("breadth")
     bo = data[b_only].groupby("date").size().rename("bias_only")
-    out = hist.join(br, how="left").join(bo, how="left").fillna(0)
-    out["breadth"] = out["breadth"].astype(int)
-    out["bias_only"] = out["bias_only"].astype(int)
+    brm = data[m & mb].groupby("date").size().rename("breadth_main")
+    bom = data[b_only & mb].groupby("date").size().rename("bias_only_main")
+    out = hist.join(br, how="left").join(bo, how="left")
+    out = out.join(brm, how="left").join(bom, how="left").fillna(0)
+    for c in ("breadth", "bias_only", "breadth_main", "bias_only_main"):
+        out[c] = out[c].astype(int)
     return out.tail(days).reset_index()
 
 
@@ -472,13 +540,27 @@ def _parse_tencent(txt: str) -> dict:
         if price <= 0:                            # 停牌/无成交 → 用昨收
             price = prev
         t = f[30]
+        # ★ 盘中扫描需要的额外字段（腾讯快照下标已实测确认）：
+        #   [36] 成交量(手)   [57] 成交额(万元，精确)   [38] 换手率(%)
+        #   [45] 总市值(亿元)  [49] 量比（腾讯自己的口径，仅作交叉校验）
+        def _f(i, d=0.0):
+            try:
+                return float(f[i])
+            except Exception:
+                return d
         out[code6] = dict(
             code=code6, name=f[1],
             date=f"{t[0:4]}-{t[4:6]}-{t[6:8]}" if len(t) >= 8 else "",
             time=f"{t[8:10]}:{t[10:12]}" if len(t) >= 12 else "",
             close=price, prev=prev,
             open=float(f[5] or 0), high=float(f[33] or 0), low=float(f[34] or 0),
-            change_pct=float(f[32] or 0), source="腾讯")
+            change_pct=float(f[32] or 0), source="腾讯",
+            vol_hand=_f(36),                       # 当日累计成交量（手）
+            amount_wan=_f(57) or _f(37),           # 当日累计成交额（万元）
+            turnover_pct=_f(38),                   # 换手率(%)
+            mv_total_yi=_f(45),                    # 总市值（亿元）
+            vol_ratio_rt=_f(49),                   # 量比（腾讯口径）
+        )
     return out
 
 
@@ -546,3 +628,419 @@ def fetch_live_quotes(codes: list[str]) -> dict:
     except Exception:
         pass
     return {}
+
+
+# ================================================================== 盘中全市场扫描
+"""
+为什么需要它：策略的「广度」是收盘口径，盘中拿不到。但用户盘中（如 14:30）就
+需要有决策依据，所以这里用**实时快照**把当天的广度「推演」出来。
+
+三个口径必须说清楚，否则会严重误判：
+
+① 乖离率 —— 用「前 23 根已收盘价之和 + 今日实时价」/24 推 MA24。
+   （前 23 根= 今日之前最近的 23 个交易日，正好凑满 24 日均线）
+② 量能   —— 实时成交量是「半天的量」，必须按**已开盘时间进度**折算成全日量，
+              否则盘中量比必然只有收盘的一半 → 达标股会少得离谱。
+              折算后与策略里的 vol_ratio = 全日量 / 5日均量 完全同口径。
+③ 成交额 —— 同上折算。
+
+时间进度以**快照自带的时间戳**为准（不是本机时钟），收盘后自动变成 100%。
+"""
+TRADE_TOTAL_MIN = 240          # 9:30-11:30 + 13:00-15:00 = 240 分钟
+_MIN_PROGRESS = 0.05           # 开盘不到 12 分钟就不做折算（噪声太大）
+
+
+def market_minutes(h: int, m: int) -> int:
+    """当日已开盘分钟数（0~240）。用于把盘中量/额折算成全日口径。"""
+    t = int(h) * 60 + int(m)
+    if t <= 570:            # 9:30 前
+        return 0
+    if t <= 690:            # 上午 9:30-11:30
+        return t - 570
+    if t < 780:             # 午休
+        return 120
+    if t <= 900:            # 下午 13:00-15:00
+        return 120 + (t - 780)
+    return 240              # 收盘后
+
+
+def time_progress(h: int | None = None, m: int | None = None) -> float:
+    """开盘时间进度 0~1。不传参就用本机当前时间。"""
+    if h is None:
+        now = datetime.now()
+        h, m = now.hour, now.minute
+    return round(min(1.0, max(0.0, market_minutes(h, m) / TRADE_TOTAL_MIN)), 4)
+
+
+# ---- 盘中基准（每只股票「今日之前」的那部分日线）----
+# 字段：前 23 根收盘价之和（配今日实时价推 MA24）、前 5 日均量、5 日前收盘价、上市天数
+_BASE_CSV = os.path.join(DATA_DIR, "_intraday_base.csv")
+_BASE_META = os.path.join(DATA_DIR, "_intraday_base.json")
+_BASE_COLS = ["code", "name", "data_date", "n_prior", "sum23", "vol_ma5", "close5", "last_close"]
+
+
+def save_intraday_base(recs: list[dict], cache_key: str = "") -> None:
+    """把盘中基准落盘。
+
+    ★ cache_key = f"{本地数据最新交易日}|{扫描日}" —— 两者**任一**变化都重建：
+      · 本地数据前进了一天（跑了盘后任务）→ 基准必须跟着前移
+      · 扫描日换了（今天 → 明天）→ 「今日之前」这个集合变了
+    重建一次约 1.5~3 秒，每天最多发生一次，不值得为省这点时间去冒险。
+    """
+    try:
+        df = pd.DataFrame(recs, columns=_BASE_COLS)
+        df.to_csv(_BASE_CSV, index=False, encoding="utf-8")
+        with open(_BASE_META, "w", encoding="utf-8") as f:
+            json.dump(dict(cache_key=cache_key, n=len(df),
+                           built_at=datetime.now().isoformat(timespec="seconds")), f)
+    except Exception as e:
+        print(f"[intraday_base] 落盘失败：{e}")
+
+
+def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | None:
+    """只读 CSV **尾部**，拿到该股「今日之前」的基准指标。
+
+    ★ 为什么不用 load_dataset：全量汇总要读 1578 万行、约 4 分钟，
+      而盘中每日都要算一次，必须压到秒级。每只股票只需要最后 24 行，
+      所以按字节 seek 到文件尾部读取即可（快两个数量级）。
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            start = max(0, size - n_bytes)
+            f.seek(start)
+            raw = f.read()
+    except Exception:
+        return None
+    lines = [l for l in raw.decode("utf-8-sig", "replace").splitlines() if l.strip()]
+    if start > 0 and lines:
+        lines = lines[1:]                    # 首行很可能是被截断的半行 → 丢掉
+    if not lines:
+        return None
+    import csv as _csv
+    import io as _io
+    rows = list(_csv.reader(_io.StringIO("\n".join(lines))))
+    if not rows:
+        return None
+    idx = None
+    if not re.match(r"^\d{4}-\d{2}-\d{2}", (rows[0][0] or "").strip()):
+        idx = {c.strip().lstrip("\ufeff"): i for i, c in enumerate(rows[0])}
+        rows = rows[1:]
+    rows = [r for r in rows if r and len(r) >= 6]
+    if not rows:
+        return None
+    i_d = (idx or {}).get("date", 0)
+    i_c = (idx or {}).get("close", 4)
+    i_v = (idx or {}).get("volume", 5)
+    recs = []
+    for r in rows[-40:]:
+        try:
+            dt = str(r[i_d])[:10]
+            if not re.match(r"^\d{4}-\d{2}-\d{2}", dt):
+                continue
+            recs.append((dt, float(r[i_c]), float(r[i_v])))
+        except Exception:
+            continue
+    prior = [x for x in recs if x[0] < today]
+    if len(prior) < 24:
+        return None
+    # 上市交易日数：尾部读不到总行数，默认用文件大小估算（每行约 89 字节）。
+    #   ★ 但「上市 ≥ 60 日」这条门槛正好卡在很小的数字上，估算误差会直接影响
+    #     判定。所以只要估算值接近门槛（<260 日），就把整个文件读一遍数准 ——
+    #     这类股票的 CSV 都很小，代价可以忽略。
+    est_rows = max(0, int((size - 46) / 89))
+    if est_rows < 260:
+        try:
+            with open(path, "rb") as f2:
+                n_exact = sum(1 for l in f2.read().decode("utf-8-sig", "replace").splitlines()
+                              if re.match(r"^\d{4}-\d{2}-\d{2}", l))
+            est_rows = max(0, n_exact - (len(recs) - len(prior)))
+        except Exception:
+            pass
+    n_prior = max(len(prior), est_rows)
+    cl = [x[1] for x in prior]
+    vo = [x[2] for x in prior]
+    return dict(data_date=prior[-1][0], n_prior=int(n_prior),
+                sum23=round(float(sum(cl[-23:])), 4),
+                vol_ma5=round(float(np.mean(vo[-5:])), 2),
+                close5=round(float(cl[-5]), 4),
+                last_close=round(float(cl[-1]), 4))
+
+
+def intraday_base(data_date: str = "", force: bool = False, log=None) -> dict:
+    """{code: 盘中基准}。优先读缓存（键 = 数据日期|扫描日），过期或缺失才重建。"""
+    log = log or (lambda s: None)
+    today = datetime.now().strftime("%Y-%m-%d")
+    key = f"{data_date or ''}|{today}"
+    if not force and os.path.exists(_BASE_CSV) and os.path.exists(_BASE_META):
+        try:
+            with open(_BASE_META, encoding="utf-8") as f:
+                meta = json.load(f)
+            if str(meta.get("cache_key") or "") == key:
+                df = pd.read_csv(_BASE_CSV, dtype={"code": str})
+                df["code"] = df["code"].str.zfill(6)
+                return {r["code"]: r for r in df.to_dict("records")}
+            log(f"[盘中] 基准缓存键 {meta.get('cache_key')} ≠ {key} → 重建")
+        except Exception as e:
+            log(f"[盘中] 基准缓存不可用（{e}），改为重建")
+
+    log("[盘中] 正在建立盘中基准（逐只读取最近 24 根日线）…")
+    t0 = time.time()
+    out = {}
+    files = [f for f in glob.glob(os.path.join(DATA_DIR, "*.csv"))
+             if not os.path.basename(f).startswith("_")]
+    for f in files:
+        code = os.path.basename(f)[:-4]
+        if not code.isdigit():
+            continue
+        m = _metrics_from_tail(f, today)
+        if m:
+            out[code] = dict(code=code, name="", **m)
+    if out:
+        save_intraday_base(list(out.values()), key)
+    log(f"[盘中] 基准建立完成：{len(out)} 只，耗时 {time.time()-t0:.1f} 秒")
+    return out
+
+
+def fetch_live_quotes_bulk(codes: list[str], chunk: int = 300, workers: int = 6,
+                           log=None) -> dict:
+    """分批并发拉取全市场实时快照 → {code: {...}}。
+
+    腾讯接口一次可以带多只，但 URL 不能无限长（5017 只拼一起约 45KB 会被拒），
+    因此按 300 只一批、6 批并发。全市场约 17 批，通常 10~30 秒完成。
+    """
+    log = log or (lambda s: None)
+    syms = [s for s in (to_sym(c) for c in codes) if s]
+    if not syms:
+        return {}
+    chunks = [syms[i:i + chunk] for i in range(0, len(syms), chunk)]
+    out: dict = {}
+    import requests
+
+    def one(cs):
+        r = requests.get(_RT_TENCENT + ",".join(cs), headers=_RT_HEADERS, timeout=15)
+        r.encoding = "gbk"
+        return _parse_tencent(r.text)
+
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futs = [ex.submit(one, cs) for cs in chunks]
+    try:
+        for fu in as_completed(futs, timeout=180):
+            try:
+                out.update(fu.result() or {})
+            except Exception:
+                pass
+    except FutTimeout:
+        log(f"[盘中] 快照有批次超时，已到手 {len(out)} 只，用现有数据继续")
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    return out
+
+
+def _shares_today(q: dict) -> float:
+    """当日成交量（**股**）。
+
+    ★★ 踩过的坑：腾讯快照里「成交量」的单位**不统一** ——
+       主板/创业板是「手」(×100 股)，而**科创板(688/689)是「股」**（实测：
+       688356 返回 2,286,700，与本地日线的 2,286,700 完全一致）。
+       若统一按「手」处理，科创板量比会被放大 **100 倍**，
+       直接导致一批根本没放量的科创板股票被误判成「达标」。
+       ⚠️ 2026-09-16 实测就出现了这个假阳性（5 只达标里有 4 只是 688）。
+
+    这里**不去猜代码前缀**，而是用「成交额 ÷ 成交量」反推：当日均价(≈VWAP)
+    必须落在当日最低价~最高价之间。这个判据对涨跌停股同样成立。
+    """
+    v = float(q.get("vol_hand") or 0)
+    if v <= 0:
+        return 0.0
+    amt = float(q.get("amount_wan") or 0) * 1e4
+    lo, hi = float(q.get("low") or 0), float(q.get("high") or 0)
+    if amt > 0 and hi > 0 and lo > 0:
+        as_share = amt / v              # 单位是「股」时的隐含均价
+        as_hand = amt / (v * 100.0)     # 单位是「手」时的隐含均价
+        ok_share = lo * 0.99 <= as_share <= hi * 1.01
+        ok_hand = lo * 0.99 <= as_hand <= hi * 1.01
+        if ok_share and not ok_hand:
+            return v
+        if ok_hand and not ok_share:
+            return v * 100.0
+    # 兜底：按主流口径（手）处理
+    return v * 100.0
+
+
+def _miss_reasons(price, vol_ratio, chg5d, amount, bar_no) -> list[str]:
+    """「仅乖离率符合」的股票还差哪几项 —— 让用户知道是差在量上还是差在别处。"""
+    miss = []
+    if vol_ratio is None or vol_ratio <= 0:
+        miss.append("无成交（停牌？）")
+    elif vol_ratio < CFG["vol_surge"]:
+        miss.append(f"量能未放大（{vol_ratio:.2f} < {CFG['vol_surge']}）")
+    if chg5d is None:
+        miss.append("近5日涨跌未知")
+    elif chg5d >= 0:
+        miss.append(f"近5日没跌（{chg5d:+.2f}%）")
+    if amount is None:
+        miss.append("成交额未知")
+    elif amount < CFG["min_amount"]:
+        miss.append(f"成交额不足（{amount/1e8:.2f} < {CFG['min_amount']/1e8:.2f} 亿）")
+    if bar_no is not None and bar_no < CFG["min_list_days"]:
+        miss.append(f"上市不足 {CFG['min_list_days']} 日（{bar_no} 日）")
+    return miss
+
+
+def intraday_scan(data_date: str = "", log=None, top: int = 30,
+                  codes: list[str] | None = None) -> dict:
+    """盘中全市场扫描：用实时快照推演「今天收盘时的」广度与两类参考清单。
+
+    返回 candidates = 全套条件达标（＝盘中口径的候选股）
+         bias_only  = 只有乖离率达标、别的不满足（附「还差哪一项」）
+    """
+    log = log or (lambda s: None)
+    today = datetime.now().strftime("%Y-%m-%d")
+    base = intraday_base(data_date=data_date, log=log)
+    if not base:
+        return dict(ok=False, msg="本地还没有可用的日线数据，请先跑一次「盘后任务」。")
+
+    uni = load_universe()
+    all_codes = codes or uni["code"].tolist()
+    t0 = time.time()
+    log(f"[盘中] 拉取全市场实时快照（{len(all_codes)} 只）…")
+    rt = fetch_live_quotes_bulk(all_codes, log=log)
+    log(f"[盘中] 收到 {len(rt)} 只快照，耗时 {time.time()-t0:.1f} 秒")
+    if len(rt) < len(all_codes) * 0.5:
+        return dict(ok=False, msg=f"实时快照只取到 {len(rt)}/{len(all_codes)} 只，"
+                                  "网络异常，请稍后重试。")
+
+    # ---- 时间进度：以快照自带时间戳为准（收盘后自然就是 100%）----
+    tcnt: dict = {}
+    for q in rt.values():
+        if q.get("date") == today and q.get("time"):
+            tcnt[q["time"]] = tcnt.get(q["time"], 0) + 1
+    early = False
+    if tcnt:
+        hhmm = max(tcnt, key=tcnt.get)
+        try:
+            h, mi = (int(x) for x in hhmm.split(":")[:2])
+        except Exception:
+            h, mi = datetime.now().hour, datetime.now().minute
+        prog = time_progress(h, mi)
+        session, quote_date = "trading", today
+        if prog >= 1.0:
+            # 快照是今天的，但时间已过 15:00 —— 此时"实时价"就是收盘价，
+            # 口径已等同于收盘，前端要说「非交易时段快照」而不是「盘中实时」。
+            session = "closed"
+        elif prog < _MIN_PROGRESS:
+            prog, early = _MIN_PROGRESS, True
+        q_time = hhmm
+    else:
+        # 快照不是今天 → 非交易日 / 盘后取到的是上一交易日收盘价
+        prog = 1.0
+        session = "closed"
+        q_time = ""
+        quote_date = max((q.get("date") or "" for q in rt.values()), default="")
+
+    th = CFG["breadth_threshold"]
+    mb_only = bool(CFG.get("main_board_only", True))
+    hits, near = [], []            # ★ 主板口径（用户只看这些）
+    hits_full = near_full = 0      # 全市场口径（与门槛 50 / 六年回测对照）
+    n_scanned = 0
+    base_date = ""
+    cmp_n = cmp_bad = 0            # 自算量比 vs 腾讯量比 的一致性自检
+    for code, q in rt.items():
+        b = base.get(code)
+        if not b:
+            continue
+        price = float(q.get("close") or 0)
+        if price <= 0:
+            continue
+        n_prior = int(b.get("n_prior") or 0)
+        if n_prior < 24:
+            continue
+        ma24 = (float(b["sum23"]) + price) / 24.0
+        if ma24 <= 0:
+            continue
+        n_scanned += 1
+        bd = str(b.get("data_date") or "")
+        if bd > base_date:
+            base_date = bd
+
+        v5 = float(b.get("vol_ma5") or 0)
+        vol_today = _shares_today(q)                            # ★ 已按板块修正单位
+        vol_ratio = (vol_today / prog) / v5 if v5 > 0 else None
+        vr_rt = float(q.get("vol_ratio_rt") or 0)
+        # ★ 自检：腾讯自己也算「量比」（同口径），两者应当接近。
+        #   若大面积对不上，说明单位或口径出了问题（历史上正是靠它抓到科创板 100 倍误差）。
+        if vol_ratio and vr_rt > 0 and prog >= 0.5:
+            cmp_n += 1
+            if abs(vol_ratio / vr_rt - 1) > 0.25:
+                cmp_bad += 1
+
+        bias = (price - ma24) / ma24 * 100
+        if bias > CFG["bias_threshold"]:
+            continue                                    # 乖离率都没达标，两类清单都不进
+        c5 = float(b.get("close5") or 0)
+        chg5d = (price / c5 - 1) * 100 if c5 > 0 else None
+        amount = float(q.get("amount_wan") or 0) * 1e4 / prog
+        bar_no = n_prior + 1
+
+        nm = q.get("name") or b.get("name") or ""
+        mb = is_main_board(code)
+        rec = dict(code=code, name=nm, board=board_of(code), mb=int(mb),
+                   close=round(price, 3),
+                   change_pct=round(float(q.get("change_pct") or 0), 2),
+                   bias=round(bias, 2),
+                   vol_ratio=(round(vol_ratio, 2) if vol_ratio is not None else None),
+                   chg5d=(round(chg5d, 2) if chg5d is not None else None),
+                   amount=round(amount, 0),
+                   turnover_pct=round(float(q.get("turnover_pct") or 0), 2),
+                   mv_total_yi=round(float(q.get("mv_total_yi") or 0), 2),
+                   vol_ratio_rt=round(float(q.get("vol_ratio_rt") or 0), 2),
+                   high=round(float(q.get("high") or 0), 3),
+                   low=round(float(q.get("low") or 0), 3),
+                   bar_no=bar_no,
+                   st=1 if ("ST" in nm.upper() or "退" in nm) else 0)
+
+        ok = ((vol_ratio is not None and vol_ratio >= CFG["vol_surge"])
+              and (chg5d is not None and chg5d < 0)
+              and amount >= CFG["min_amount"]
+              and bar_no >= CFG["min_list_days"])
+        if ok:
+            hits_full += 1
+            if mb:
+                hits.append(rec)
+        else:
+            near_full += 1
+            rec["miss"] = _miss_reasons(price, vol_ratio, chg5d, amount, bar_no)
+            if mb:
+                near.append(rec)
+
+    hits.sort(key=lambda r: r["bias"])
+    near.sort(key=lambda r: r["bias"])
+    log(f"[盘中] 扫描 {n_scanned} 只：主板达标 {len(hits)} 只 / 仅乖离率符合 {len(near)} 只"
+        f"（全市场口径 {hits_full} / {near_full}；时间进度 {prog*100:.1f}%）")
+    if cmp_n:
+        log(f"[盘中] 量比自检：{cmp_n} 只可比对，偏离>25% 的 {cmp_bad} 只"
+            f"（{'正常' if cmp_bad < cmp_n * 0.05 else '⚠ 异常，请检查单位口径'}）")
+
+    return dict(
+        ok=True, scan_at=datetime.now().isoformat(timespec="seconds"),
+        quote_date=quote_date, quote_time=q_time, session=session,
+        base_date=base_date, progress=prog, early=early,
+        scanned=n_scanned, quotes=len(rt),
+        vol_cmp=cmp_n, vol_bad=cmp_bad,
+        main_board_only=mb_only,
+        breadth=len(hits),                     # ★ 主板口径（用户实际能买的池子）
+        bias_only_total=len(near),
+        breadth_full=hits_full,                # ★ 全市场口径（与六年回测同一把尺子）
+        bias_only_full=near_full,
+        threshold=th,
+        # ★ 择时总开关用**全市场口径**：门槛 50 是在全市场 5017 只上六年回测出来的，
+        #   换成主板口径计数池变小，同一把尺子的刻度就变了（详见 threshold_main）。
+        triggered=bool(hits_full >= th),
+        threshold_main=CFG.get("breadth_threshold_main"),
+        triggered_main=(bool(len(hits) >= CFG["breadth_threshold_main"])
+                        if CFG.get("breadth_threshold_main") else None),
+        candidates=hits[:top], bias_only=near[:top],
+        bias_threshold=CFG["bias_threshold"], vol_surge=CFG["vol_surge"],
+        min_amount=CFG["min_amount"], min_list_days=CFG["min_list_days"],
+    )

@@ -80,10 +80,17 @@ def run_update(limit: int = 0, date: str = "", no_fetch: bool = False,
     log(f"[4/5] {snap['date']} 信号广度 = {snap['breadth']} 只"
         f"（仅乖离率≤{core.CFG['bias_threshold']}%：{snap['bias_only']} 只，"
         f"门槛 {snap['threshold']}）")
+    log(f"      其中沪深主板：广度 {snap['breadth_main']} 只、"
+        f"仅乖离率 {snap['bias_only_main']} 只")
 
     # ---------- 5. 候选股 ----------
+    # ★ 用户只看沪深主板 → 买入名单按主板过滤（全市场清单可用 board_only=False 拿到）
     cand = core.pick_candidates(data, target, limit=10)
+    n_sig_all = len(core.signal_rows(data, target, board_only=False))
+    n_sig_mb = len(core.signal_rows(data, target, board_only=True))
     rows = cand.to_dict("records") if not cand.empty else []
+    if core.CFG.get("main_board_only"):
+        log(f"[候选] 达标 {n_sig_all} 只 → 主板 {n_sig_mb} 只 → 取前 {len(rows)} 只")
 
     snap = dict(snap)
     snap.update(fetch_ok=ok, fetch_fail=fail, candidates=rows,
@@ -117,6 +124,8 @@ def run_update(limit: int = 0, date: str = "", no_fetch: bool = False,
                                    threshold=core.CFG["breadth_threshold"],
                                    triggered=int(r["breadth"]) >= core.CFG["breadth_threshold"],
                                    bias_only=int(r["bias_only"]),
+                                   breadth_main=int(r.get("breadth_main", 0)),
+                                   bias_only_main=int(r.get("bias_only_main", 0)),
                                    stocks_total=int(r["total"])))
             log(f"      广度历史已写入（近 {len(hist)} 个交易日）")
         except Exception as e:

@@ -141,18 +141,32 @@ def api_status():
     last_date = d["date"] if d else None
     running = [k for k in tasks.TASK_KEYS if tasks.STATE[k]["running"]]
     stale, exp, hint = staleness(last_date)
+    data_version = f"{last_date}|{d['updated_at']}" if d else "empty"
+    # ★ 版本号 = 数据版本 + 最近一次任务执行。
+    #   靠数据版本只能发现「盘后任务」，盘中任务/盘前任务不写 daily 表，
+    #   结果就是「任务跑了但页面不刷新」。把任务执行也并进版本号，任何任务跑完都会刷新。
+    try:
+        rid, rfin, rkey, rstat = db.get_last_run_id()
+    except Exception:
+        rid, rfin, rkey, rstat = 0, "", "", ""
+    version = f"{data_version}#{rid}#{rfin}#{rstat}"
     return jsonify(dict(
         ok=True,
         last_date=last_date,
         updated_at=d["updated_at"] if d else None,
         breadth=d["breadth"] if d else None,
+        breadth_main=(d["breadth_main"] if d else None),
         threshold=core.CFG["breadth_threshold"],
+        threshold_main=core.CFG.get("breadth_threshold_main"),
+        main_board_only=bool(core.CFG.get("main_board_only", True)),
         updating=UPDATE_STATE["running"],
         update_msg=UPDATE_STATE["msg"],
         running_tasks=running,
-        # ★ 数据版本号：前端靠它判断"数据变了没有"，变了就整页刷新四张卡片。
+        # ★ 数据版本号：前端靠它判断"数据变了没有"，变了就整页刷新所有卡片。
         #   只要 save_daily 写过一次，updated_at 就会变（见 db.save_daily）。
-        data_version=f"{last_date}|{d['updated_at']}" if d else "empty",
+        data_version=data_version,
+        version=version,
+        last_run=dict(id=rid, task=rkey, status=rstat, finished_at=rfin),
         expected_date=exp,
         stale=stale,
         stale_hint=hint,
@@ -167,13 +181,18 @@ def api_today():
         return jsonify(dict(ok=False, msg="尚无数据，请先到「任务中心」跑一次「盘后任务」。"))
     cands = db.get_candidates(d["date"])
     stale, exp, hint = staleness(d["date"])
+    tm = core.CFG.get("breadth_threshold_main")
     return jsonify(dict(
         ok=True,
         date=d["date"],
         breadth=d["breadth"],
         bias_only=d["bias_only"],
+        breadth_main=d.get("breadth_main"),
+        bias_only_main=d.get("bias_only_main"),
         stocks_total=d["stocks_total"],
         threshold=d["threshold"],
+        threshold_main=tm,
+        main_board_only=bool(core.CFG.get("main_board_only", True)),
         triggered=bool(d["triggered"]),
         updated_at=d["updated_at"],
         expected_date=exp,
@@ -190,7 +209,23 @@ def api_history():
     days = int(request.args.get("days", 250))
     rows = db.get_daily_history(days)
     return jsonify(dict(ok=True, threshold=core.CFG["breadth_threshold"],
-                        rows=[dict(date=r["date"], breadth=r["breadth"]) for r in rows]))
+                        threshold_main=core.CFG.get("breadth_threshold_main"),
+                        rows=[dict(date=r["date"], breadth=r["breadth"],
+                                   breadth_main=r.get("breadth_main"))
+                              for r in rows]))
+
+
+@app.get("/api/intraday")
+def api_intraday():
+    """最近一次「盘中任务」的扫描结果（供页面「盘中参考」卡片使用）。"""
+    got = db.get_scan("intraday")
+    if not got:
+        return jsonify(dict(ok=False, msg="还没有盘中扫描结果。到「任务中心」跑一次「盘中任务」即可。"))
+    # ★ 不能写 dict(ok=..., **p)：p 里本来就有 ok 键，会抛
+    #   "got multiple values for keyword argument 'ok'" → 接口 500。
+    out = dict(got["payload"])
+    out["created_at"] = got["created_at"]
+    return jsonify(out)
 
 
 # ------------------------------------------------------------------ 持仓

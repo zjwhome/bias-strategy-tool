@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from datetime import datetime, timedelta
@@ -25,7 +26,9 @@ CREATE TABLE IF NOT EXISTS daily (
     triggered     INTEGER,
     bias_only     INTEGER,
     stocks_total  INTEGER,
-    updated_at    TEXT
+    updated_at    TEXT,
+    breadth_main  INTEGER,
+    bias_only_main INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS candidates (
@@ -87,6 +90,14 @@ CREATE TABLE IF NOT EXISTS task_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_key ON task_runs(task_key, id);
+
+-- 一次性结果的快照（目前用于「盘中扫描」结果），每个 key 只保留最新一份。
+-- 放在库里而不是内存里，是为了让「控制台触发的任务」与「网页」也能共享结果。
+CREATE TABLE IF NOT EXISTS scan_cache (
+    key        TEXT PRIMARY KEY,
+    payload    TEXT,
+    created_at TEXT
+);
 """
 
 
@@ -129,20 +140,35 @@ def init_db() -> None:
         except Exception:
             pass
         conn.executescript(SCHEMA)
+        # ★ 老库升级：daily 表新增「主板口径」两列。SQLite 不支持
+        #   ADD COLUMN IF NOT EXISTS，只能先试后吞异常（重复执行会报 duplicate column）。
+        for col in ("breadth_main", "bias_only_main"):
+            try:
+                conn.execute(f"ALTER TABLE daily ADD COLUMN {col} INTEGER")
+            except Exception:
+                pass
 
 
 def save_daily(snap: dict) -> None:
-    """写入/更新某日广度快照"""
+    """写入/更新某日广度快照
+
+    breadth / bias_only        = 全市场口径（择时用它，与六年回测同一把尺子）
+    breadth_main / bias_only_main = 其中属于沪深主板的部分（用户实际可买的池子）
+    """
     with connect() as conn:
         conn.execute(
-            """INSERT INTO daily(date, breadth, threshold, triggered, bias_only, stocks_total, updated_at)
-               VALUES(?,?,?,?,?,?,?)
+            """INSERT INTO daily(date, breadth, threshold, triggered, bias_only, stocks_total,
+                                 updated_at, breadth_main, bias_only_main)
+               VALUES(?,?,?,?,?,?,?,?,?)
                ON CONFLICT(date) DO UPDATE SET
                  breadth=excluded.breadth, threshold=excluded.threshold,
                  triggered=excluded.triggered, bias_only=excluded.bias_only,
-                 stocks_total=excluded.stocks_total, updated_at=excluded.updated_at""",
+                 stocks_total=excluded.stocks_total, updated_at=excluded.updated_at,
+                 breadth_main=excluded.breadth_main, bias_only_main=excluded.bias_only_main""",
             (snap["date"], snap["breadth"], snap["threshold"], int(snap["triggered"]),
-             snap["bias_only"], snap["stocks_total"], datetime.now().isoformat(timespec="seconds")),
+             snap["bias_only"], snap["stocks_total"],
+             datetime.now().isoformat(timespec="seconds"),
+             snap.get("breadth_main"), snap.get("bias_only_main")),
         )
 
 
@@ -299,6 +325,41 @@ def has_run_since(task_key: str, since_iso: str) -> bool:
                WHERE task_key=? AND started_at>=? AND status IN ('ok','fail','running')""",
             (task_key, since_iso)).fetchone()[0]
     return n > 0
+
+
+def save_scan(key: str, payload: dict) -> None:
+    """保存一份一次性结果快照（目前用于「盘中扫描」）。"""
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO scan_cache(key, payload, created_at) VALUES(?,?,?)
+               ON CONFLICT(key) DO UPDATE SET
+                 payload=excluded.payload, created_at=excluded.created_at""",
+            (key, json.dumps(payload, ensure_ascii=False, default=str),
+             datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def get_scan(key: str) -> dict | None:
+    """读取结果快照 → {"payload": {...}, "created_at": "..."}，没有则 None"""
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM scan_cache WHERE key=?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        return dict(payload=json.loads(row["payload"]), created_at=row["created_at"])
+    except Exception:
+        return None
+
+
+def get_last_run_id() -> tuple:
+    """最近一次任务执行的 (id, finished_at, task_key)。用于给前端做「版本号」。"""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, finished_at, task_key, status FROM task_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return (0, "", "", "")
+    return (row["id"], row["finished_at"] or "", row["task_key"] or "", row["status"] or "")
 
 
 def has_running_task(max_age_min: int = 120) -> list[str]:

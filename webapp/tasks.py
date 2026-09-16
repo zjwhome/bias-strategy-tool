@@ -44,10 +44,16 @@ TASK_DEFS = {
     "intraday": dict(
         key="intraday", name="盘中任务", icon="⏱",
         suggest="14:30",
-        desc="盘中盯盘，只检查你的持仓，预警止盈/止损是否已被触发。",
-        long_desc=("只拉取你持仓那几只股票的实时价格（很快），逐只算出浮盈浮亏，"
-                   "并提示「已到 +6% 可卖一半」「已到 +10% 该清仓」「已跌破 -6% 预警」"
-                   "「从最高点回撤 3% 该走」。注意：策略规则以收盘价为准，盘中只作预警。"),
+        desc="盘中跑。用实时行情推演今天的广度，给出「达标」和「仅乖离率符合」两张参考清单。",
+        long_desc=("盘中（建议 14:30 左右）拉取全市场实时快照，用「前 23 根收盘价 + 实时价」"
+                   "现场推演今天的 24 日均线乖离率，并按时间进度把成交量/成交额折算成全日口径，"
+                   "于是**不用等到收盘**就能看到今天的信号广度与候选股。\n"
+                   "输出两张清单：① 全套条件达标（＝盘中口径的买入候选）；"
+                   "② 只有乖离率到位、还差别的条件（附「差在哪一项」）。\n"
+                   "★ 只统计沪深主板（其他板不考虑）。\n"
+                   "★ 若你持有股票，同时做一次持仓实时体检，预警止盈/止损。\n"
+                   "★ 盘中口径是「推演」，不是收盘定论：越接近 14:55 越准；"
+                   "最终仍以收盘后的「盘后任务」为准。"),
     ),
     "postmarket": dict(
         key="postmarket", name="盘后任务", icon="🌙",
@@ -341,75 +347,143 @@ def run_premarket(log=None) -> dict:
 
 # ================================================================== ② 盘中任务
 def run_intraday(log=None) -> dict:
+    """盘中（建议 14:30）：推演今日广度 + 两张参考清单 + 持仓实时体检。"""
     log = log or (lambda s: print(s, flush=True))
-    hs = db.list_holdings("holding")
+    today = datetime.now().strftime("%Y-%m-%d")
+    d = _latest_daily()
+    market_date = d["date"] if d else ""
 
-    if not hs:
+    # ---------------- ① 全市场盘中扫描 ----------------
+    log("[盘中] 开始全市场盘中扫描…")
+    scan = core.intraday_scan(data_date=market_date, log=log)
+    blocks = []
+    if scan.get("ok"):
+        try:
+            db.save_scan("intraday", scan)      # 页面「盘中参考」卡片读这一份
+        except Exception as e:
+            log(f"[盘中] 扫描结果落库失败：{e}")
+    else:
+        log(f"[盘中] 扫描失败：{scan.get('msg')}")
+
+    # ---------------- ② 持仓实时体检 ----------------
+    hs = db.list_holdings("holding")
+    hold_block = None
+    act = []
+    if hs:
+        log(f"[盘中] 拉取 {len(hs)} 只持仓的实时行情…")
+        codes = [str(h["code"]).zfill(6) for h in hs]
+        rt = core.fetch_live_quotes(codes)
+        quotes, fails, qdate, src = {}, [], "", ""
+        for h in hs:
+            q = rt.get(str(h["code"]).zfill(6))
+            if q and q.get("close"):
+                quotes[h["code"]] = float(q["close"])
+                qdate = q.get("date") or qdate
+                src = q.get("source") or src
+                log(f"    {h['code']} {q.get('name') or h.get('name') or ''} → "
+                    f"{q['close']:.2f}（{q.get('date')} {q.get('time')} · {q.get('source')}）")
+            else:
+                fails.append(h["code"])
+                log(f"    {h['code']} 实时行情获取失败，回退本地缓存")
+        ev = evaluate_holdings(quotes=quotes, quote_date=qdate or today,
+                              latest_market_date=today, intraday=True)
+        act = _need_action(ev)
+        hold_block = dict(title=f"持仓实时体检（{len(ev)} 只，触发 {len(act)} 只）",
+                          kind="holdings", rows=act if act else ev)
+        if fails:
+            log(f"[盘中] 持仓行情失败：{'、'.join(fails)}")
+    else:
+        log("[盘中] 当前无持仓，跳过持仓体检")
+
+    # ---------------- ③ 结论 ----------------
+    if not scan.get("ok"):
+        headline = "盘中扫描未成功 —— " + str(scan.get("msg") or "请稍后重试")
+        level = "warn"
+        blocks.append(dict(title="说明", kind="text", text=
+            "盘中扫描需要联网拉取全市场实时快照。若一直失败，请检查网络后重试；"
+            "也可以直接等到收盘后跑「盘后任务」。"))
+        if hold_block:
+            blocks.append(hold_block)
+        detail = _render_detail(headline, blocks)
+        return dict(headline=headline, level=level, blocks=blocks, detail=detail,
+                    market_date=today)
+
+    th = scan["threshold"]
+    pool = scan["breadth"]                 # 主板达标
+    gate = scan["triggered"]               # 全市场达标（择时总开关）
+    near_n = scan["bias_only_total"]
+    tm = scan.get("threshold_main")
+
+    if gate and pool:
+        headline = f"★ 出手日：全市场广度 {scan['breadth_full']} ≥ {th}，主板可选 {pool} 只"
+        level = "ok"
+    elif gate:
+        headline = f"全市场广度 {scan['breadth_full']} 已达标，但主板暂无全额达标的个股"
+        level = "warn"
+    elif pool:
+        headline = f"主板有 {pool} 只额度达标，但全市场广度 {scan['breadth_full']} < {th} → 只观察"
+        level = "warn"
+    else:
+        headline = (f"今日暂无达标个股（主板 0 只；仅乖离率到位 {near_n} 只，可观察）"
+                    if near_n else "今日暂无任何信号 —— 空仓等待")
+        level = "neutral"
+
+    # ---------------- ④ 概览 ----------------
+    prog = scan["progress"]
+    prog_txt = ("全部（已收盘）" if prog >= 0.999 else f"{prog*100:.0f}%")
+    rows_kv = [
+        dict(k="行情时间", v=f"{scan['quote_date']} {scan['quote_time']}"),
+        dict(k="时间进度", v=prog_txt + ("　⚠ 开盘不足，折算误差大" if scan.get("early") else "")),
+        dict(k="日线基准日", v=scan["base_date"]),
+        dict(k="扫描股票", v=f"{scan['scanned']} 只"),
+        dict(k="★ 主板达标", v=f"{pool} 只"),
+        dict(k="主板仅乖离率符合", v=f"{near_n} 只"),
+        dict(k="全市场口径", v=f"达标 {scan['breadth_full']} 只 / 门槛 {th} 只"
+                              + (f"（主板等效门槛 {tm}）" if tm else "")),
+    ]
+    blocks.append(dict(title="今日盘中概览", kind="kv", rows=rows_kv))
+
+    # ---------------- ⑤ 两张参考清单 ----------------
+    if scan["candidates"]:
+        blocks.append(dict(title=f"★ 达标清单（主板，{pool} 只，按乖离率升序）",
+                           kind="intraday", mode="hit", rows=scan["candidates"]))
+    else:
+        blocks.append(dict(title="达标清单：无", kind="text",
+                           text=(f"主板没有同时满足「BIAS≤{scan['bias_threshold']}% + "
+                                 f"放量≥{scan['vol_surge']}× + 近5日跌 + "
+                                 f"成交额≥{scan['min_amount']/1e8:.2f}亿 + "
+                                 f"上市≥{scan['min_list_days']}日」的股票。\n"
+                                 "这是常态，不是工具没跑。")))
+    if scan["bias_only"]:
+        blocks.append(dict(title=f"仅乖离率符合（主板，{near_n} 只）—— 参考，未达标",
+                           kind="intraday", mode="near", rows=scan["bias_only"]))
+        blocks.append(dict(title="两张清单的区别", kind="text", text=
+            "· **达标清单**：乖离率 + 放量 + 近5日跌 + 成交额 + 上市时长，条件全过 → 才是策略意义的买入候选。\n"
+            "· **仅乖离率符合**：只有「跌得够狠」这一条成立，**还差别的条件**。"
+            "它属于观察池：如果下午放量补上，收盘时就可能转成达标（这也是 14:30 跑一次的用处所在）。\n"
+            "★ 无论哪一张清单，**都不构成投资建议**；且盘中数据是推演，最终以收盘为准。"))
+
+    # ---------------- ⑥ 持仓 ----------------
+    if hold_block:
+        blocks.append(hold_block)
         ec_ = exit_config()
         t1, t2 = ec_["take_profit_tiers_pct"]
-        msg = ("当前没有持仓，盘中无需盯盘。\n\n"
-               "盘中任务的用途：当你持有股票时，实时监控它们是否触及"
-               f"止盈（+{t1:.0f}% / +{t2:.0f}%）、止损（{ec_['hard_stop_loss_pct']:+.0f}%）"
-               f"或移动止盈（回撤 {ec_['trailing_drawdown_pct']:.0f}%）。")
-        log("[盘中] 无持仓，跳过")
-        return dict(headline="当前没有持仓，盘中无需盯盘。", level="neutral",
-                    blocks=[dict(title="说明", kind="text", text=msg)],
-                    detail=msg)
-
-    log(f"[盘中] 拉取 {len(hs)} 只持仓的实时行情…")
-    codes = [str(h["code"]).zfill(6) for h in hs]
-    rt = core.fetch_live_quotes(codes)
-
-    quotes, fails, qdate, src = {}, [], "", ""
-    for h in hs:
-        q = rt.get(str(h["code"]).zfill(6))
-        if q and q.get("close"):
-            quotes[h["code"]] = float(q["close"])
-            qdate = q.get("date") or qdate
-            src = q.get("source") or src
-            log(f"    {h['code']} {q.get('name') or h.get('name') or ''} → "
-                f"{q['close']:.2f}（{q.get('date')} {q.get('time')} · {q.get('source')}）")
-        else:
-            fails.append(h["code"])
-            log(f"    {h['code']} 实时行情获取失败，回退本地缓存")
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    ev = evaluate_holdings(quotes=quotes, quote_date=qdate or today,
-                           latest_market_date=today, intraday=True)
-    act = _need_action(ev)
-
-    if act:
-        danger = [x for x in act if x["level"] == "danger"]
-        headline = (f"⚠️ 盘中预警：{len(act)} 只持仓触发了卖出条件"
-                    if danger else f"盘中提示：{len(act)} 只持仓可考虑操作")
-        level = "danger" if danger else "warn"
+        blocks.append(dict(title="持仓规则（以收盘价为准）", kind="text", text=
+            f"· 止损 {ec_['hard_stop_loss_pct']:+.0f}%（收盘确认，次日开盘卖）\n"
+            f"· 止盈 +{t1:.0f}% 卖一半 / +{t2:.0f}% 清仓；浮盈曾达 "
+            f"+{ec_['trailing_trigger_pct']:.0f}% 后回撤 {ec_['trailing_drawdown_pct']:.0f}% 清仓\n"
+            f"· 最长持有 {ec_['max_hold_days']} 个交易日\n"
+            "· 盘中只作**预警**，不要因为盘中插针就慌着动手。"))
     else:
-        headline = f"{len(ev)} 只持仓均未触发条件，继续持有。"
-        level = "ok"
-
-    blocks = [dict(title=f"持仓实时体检（{len(ev)} 只，触发 {len(act)} 只）",
-                   kind="holdings", rows=act if act else ev)]
-    if src:
-        blocks.append(dict(title=f"行情来源：{src}"
-                                 + (f"（{qdate} 实时）" if qdate else ""),
-                           kind="text",
-                           text=("盘中价格来自腾讯/新浪实时快照接口。\n"
-                                 "注意：本地缓存的日线数据要等收盘后跑「盘后任务」才会更新。")))
-    ec_ = exit_config()
-    t1, t2 = ec_["take_profit_tiers_pct"]
-    blocks.append(dict(
-        title="重要说明", kind="text",
-        text=("· 本策略的止损/止盈**以收盘价为准**，盘中只作预警，不要因为盘中插针就慌。\n"
-              "· 止损执行时点 = 收盘确认跌破后，**次日开盘卖出**。\n"
-              f"· 若盘中已到 +{t1:.0f}% / +{t2:.0f}%，可以考虑提前落袋，但不是必须。")))
-    if fails:
-        blocks.append(dict(title="行情获取失败", kind="text",
-                           text="以下股票未取到实时行情，已回退用最近收盘价：" + "、".join(fails)))
+        blocks.append(dict(title="持仓实时体检", kind="text",
+                           text="当前没有持仓记录，跳过。"))
 
     detail = _render_detail(headline, blocks)
     log(f"[盘中] {headline}")
     return dict(headline=headline, level=level, blocks=blocks, detail=detail,
-                market_date=today, quote_date=qdate)
+                market_date=today, quote_date=scan["quote_date"],
+                breadth=scan["breadth"], breadth_full=scan["breadth_full"],
+                threshold=th, triggered=gate)
 
 
 # ================================================================== ③ 盘后任务
@@ -614,6 +688,17 @@ def _render_detail(headline: str, blocks: list[dict]) -> str:
                     f"   {i:>2}. {r.get('code')} {r.get('name') or '':<6} "
                     f"现价 {r.get('close')}  BIAS {r.get('bias'):.2f}%  "
                     f"换手 {r.get('turnover_pct')}%  量比 {r.get('vol_ratio')}")
+        elif kind == "intraday":
+            for i, r in enumerate(b.get("rows", []), 1):
+                lines.append(
+                    f"   {i:>2}. {r.get('code')} {r.get('name') or '':<6} "
+                    f"{r.get('board') or '':<5} 现价 {r.get('close')}  "
+                    f"BIAS {(r.get('bias') if r.get('bias') is not None else 0):.2f}%  "
+                    f"量比 {(r.get('vol_ratio') if r.get('vol_ratio') is not None else 0):.2f}  "
+                    f"近5日 {(r.get('chg5d') if r.get('chg5d') is not None else 0):+.2f}%  "
+                    f"额 {((r.get('amount') or 0)/1e8):.2f}亿  换手 {r.get('turnover_pct')}%")
+                if r.get("miss"):
+                    lines.append(f"        差：{'、'.join(r['miss'])}")
         lines.append("")
     return "\n".join(lines)
 
