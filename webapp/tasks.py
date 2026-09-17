@@ -57,15 +57,18 @@ TASK_DEFS = {
     ),
     "postmarket": dict(
         key="postmarket", name="盘后任务", icon="🌙",
-        suggest="15:35",
+        suggest="17:30",
         desc="收盘后跑。更新全市场数据，算出今日广度，决定「明天是否出手」。",
-        long_desc=("这是最核心的任务：拉取全市场 5017 只股票的最新日线（约 20~25 分钟），"
+        long_desc=("这是最核心的任务：拉取全市场 5017 只股票的最新日线（约 15~25 分钟），"
                    "算出今日信号广度。广度 ≥ 门槛 → 输出明天的买入候选股；"
-                   "否则明确告诉你「明天不动手」。同时完成持仓体检和「明日操作计划」。"
-                   "★ 数据源时效：新浪的「当日」日线通常要到当天傍晚才发布。"
-                   "15:35 就跑的话，拿到的很可能仍是上一个交易日的数据，"
-                   "页面会明确提示「数据源尚未发布 XX 行情」——那种情况傍晚再跑一次即可，"
-                   "不用重复跑，重复跑不会更快拿到当天数据。"),
+                   "否则明确告诉你「明天不动手」。同时完成持仓体检和「明日操作计划」。\n"
+                   "★★ 建议 **17:30 之后**再跑（默认时间已按此设置）。\n"
+                   "原因：新浪的「当日」日线要到当天傍晚才**分批**发布。实测规律很清楚 ——\n"
+                   "     15:00~16:15 跑 → 拿到的全是**前一天**的数据；\n"
+                   "     17:00 之后跑 → 拿到当天数据。\n"
+                   "跑早了不会报错，只是结果里写的日期还是昨天（页面会提示「数据源尚未发布 XX 行情」）。\n"
+                   "★ 现在跑早了也不用担心：系统会识别「数据还没更新到今天」并自动补抓一次；"
+                   "若仍不完整，则会**拒绝写库**并明确告诉你要过一会儿重跑 —— 不会把半份数据当成结果。"),
     ),
 }
 TASK_KEYS = ["premarket", "intraday", "postmarket"]
@@ -533,6 +536,49 @@ def run_postmarket(log=None, limit: int = 0, no_fetch: bool = False) -> dict:
 
     log("[盘后] 开始更新全市场数据…")
     res = _run_update_with_progress(log, limit=limit, no_fetch=no_fetch, progress=prog)
+
+    # ★ 数据不完整 / 取不到数据时，绝不能照常报「广度 X 未达标」——
+    #   那会被理解成"今天没信号、明天不动手"，而真相是数据只读到一半。
+    #   必须明确说明「本次没有写入任何结果」，否则用户会拿着失真的结论去操作。
+    if res.get("blocked") in ("incomplete_data", "no_data"):
+        blocked = res["blocked"]
+        have = res.get("stocks_total") or 0
+        total_u = res.get("universe_total") or have
+        if blocked == "incomplete_data":
+            headline = "⚠️ 本次数据不完整，已中止且未写入任何结果"
+            text = (
+                f"计划处理 {total_u} 只股票，但只有 {have} 只拿到了 {res.get('date')} 的行情"
+                f"（{res.get('coverage')}%），低于 90% 的完整性底线。\n"
+                f"本次有 {res.get('fetch_fail')} 只下载失败。\n\n"
+                "为什么必须中止：若按这半份数据计算，广度会系统性偏低，"
+                "可能把「该出手的日子」误判成「不该出手」。"
+                "这个错误一旦写进历史曲线，事后几乎无法察觉。\n\n"
+                "怎么办：稍等片刻，再跑一次「盘后任务」即可。"
+                "系统会自动补抓上一轮失败的股票，通常第二次就补齐了。")
+        else:
+            headline = f"⚠️ {res.get('date')} 没有取到任何行情数据，未写入结果"
+            text = ("最常见的原因：今天不是交易日（周末 / 节假日），"
+                    "或者数据源当天还没更新。\n\n"
+                    "本次没有向数据库写入任何内容，既有的历史数据完好无损。")
+        blocks = [
+            dict(title="发生了什么", kind="text", text=text),
+            dict(title="本次数据概览", kind="kv", rows=[
+                dict(k="目标交易日", v=str(res.get("date"))),
+                dict(k="应有股票数", v=f"{total_u} 只"),
+                dict(k="实有当日行情", v=f"{have} 只"),
+                dict(k="下载成功 / 失败", v=f"{res.get('fetch_ok', 0)} / {res.get('fetch_fail', 0)}"),
+                dict(k="耗时", v=f"{res.get('elapsed_min')} 分钟"),
+            ]),
+        ]
+        act = _need_action(evaluate_holdings(latest_market_date=res.get("date") or ""))
+        if act:
+            blocks.append(dict(title=f"持仓体检（需处理 {len(act)} 只）",
+                               kind="holdings", rows=act))
+        detail = _render_detail(headline, blocks)
+        log(f"[盘后] {headline}")
+        return dict(headline=headline, level="warn", blocks=blocks, detail=detail,
+                    market_date=res.get("date"), breadth=res.get("breadth"),
+                    threshold=res.get("threshold"), triggered=False, blocked=blocked)
 
     with _LOCK:
         STATE[key].update(phase="体检持仓", done=0, total=0, msg="")

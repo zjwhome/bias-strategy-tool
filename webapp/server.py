@@ -585,11 +585,11 @@ def api_task_schedule(key):
         hh, mm = [int(x) for x in at_time.split(":")]
         assert 0 <= hh <= 23 and 0 <= mm <= 59
     except Exception:
-        return jsonify(dict(ok=False, msg="时间格式应为 HH:MM，例如 15:35")), 400
+        return jsonify(dict(ok=False, msg="时间格式应为 HH:MM，例如 17:30")), 400
     # ★ 校验星期：只接受 1~7（1=周一），去重后按数字排序。
     #   以前这里完全不校验，{"days":"9,x"} 会被原样存库 —— 而调度器是按
     #   `today in days.split(",")` 匹配的，非法值永远匹配不上：
-    #   定时**静默地永不触发**，界面上却还老老实实显示「每天 15:35」。
+    #   定时**静默地永不触发**，界面上却还老老实实显示「每天 17:30」。
     #   顺手把中文逗号也认掉（用户从文档里复制的多是全角）。
     parts = [p.strip() for p in raw_days.replace("，", ",").split(",") if p.strip()]
     bad = [p for p in parts if p not in ("1", "2", "3", "4", "5", "6", "7")]

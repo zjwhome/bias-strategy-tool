@@ -22,6 +22,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime
 
 import pandas as pd
 
@@ -64,8 +65,22 @@ def run_update(limit: int = 0, date: str = "", no_fetch: bool = False,
     if no_fetch:
         log("[2/5] 跳过数据下载（no_fetch）")
     else:
+        # ★ 期望拿到的最新交易日（2026-09-17 事故修复）：
+        #   数据源收盘后**逐步更新**，跑得太早会有一批股票仍停在前一交易日。
+        #   旧实现只看"有没有拿到数据"，把陈旧数据当完整数据用 → 广度按半份算。
+        #   这里把期望日期传下去，未更新到该日的股票会被算作"本轮未完成"并补抓。
+        #   仅当「今天确实是交易日」且非回看模式时才要求；判断不了（None）就放行。
+        expect = ""
+        if not date:
+            today = datetime.now().strftime("%Y-%m-%d")
+            try:
+                if core.is_trade_day(today) is not False:
+                    expect = today
+            except Exception:
+                expect = ""
         log(f"[2/5] 更新全市场日线（{workers or core.CFG['workers']} 线程）…")
-        ok, fail = core.update_cache(codes, workers=workers or None, progress=progress)
+        ok, fail = core.update_cache(codes, workers=workers or None, progress=progress,
+                                     expect_date=expect or None)
         log(f"      下载完成：成功 {ok}，失败 {fail}，耗时 {(time.time()-t0)/60:.1f} 分钟")
 
     # ---------- 3. 汇总数据集 ----------
@@ -100,12 +115,36 @@ def run_update(limit: int = 0, date: str = "", no_fetch: bool = False,
     #   ① 指定日期不是交易日 / 数据缺失 → 全市场 0 只，写进去会变成"假广度 0"，
     #      并且在曲线上留下一个错误的空档（历史 bug 就源于此）。
     #   ② 测试模式（--limit）只跑了部分股票 → 广度必然偏低，不代表全市场。
+    snap["universe_total"] = len(codes)          # 供报告显示"应有 / 实有"对比
     if snap["stocks_total"] == 0:
         log(f"      ⚠️ {snap['date']} 无任何行情数据（可能不是交易日），已跳过写库。")
+        snap["blocked"] = "no_data"
         return snap
     if partial:
         log(f"      ⚠️ 测试模式（仅 {len(codes)} 只股票），结果不写入数据库。")
+        snap["blocked"] = "partial"
         return snap
+
+    #   ③ ★★ 数据完整性闸门（2026-09-17 事故后新增）★
+    #      那次全市场下载只成功了一半（2536/5017），而旧检查只拦 stocks_total==0，
+    #      2536 顺利放行 → **半份数据算出的广度会被静默写进库**。
+    #      广度是择时总开关，这种"静默偏低"会直接误导第二天的操作，且日志毫无异常。
+    #      正常完整日覆盖率是 99.8%（5007/5017，差额是停牌股），故 90% 是安全底线。
+    #      注：回看历史（显式指定 date）时早年上市公司少，覆盖率天然偏低 → 不适用本闸门。
+    if not date:
+        cover = snap["stocks_total"] / max(1, len(codes))
+        if cover < 0.9:
+            log(f"      ⚠️ 数据不完整：{snap['date']} 只有 {snap['stocks_total']}/{len(codes)} 只"
+                f"（{cover * 100:.1f}%）有当日行情，**已拒绝写库**（需 ≥90%）。")
+            if fail:
+                log(f"         本次下载失败 {fail} 只 —— 多半是数据源限流/网络抖动，"
+                    f"稍后重跑本任务即可（系统会自动补抓失败的股票）。")
+            snap["blocked"] = "incomplete_data"
+            snap["coverage"] = round(cover * 100, 1)
+            return snap
+        if fail and fail / max(1, len(codes)) > 0.05:
+            log(f"      ⚠️ 注意：本次有 {fail} 只下载失败，但当日覆盖率仍达 "
+                f"{cover * 100:.1f}%，按完整数据处理。")
 
     log(f"[5/5] 候选股 {len(rows)} 只")
     db.save_daily(snap)

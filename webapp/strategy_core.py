@@ -348,75 +348,139 @@ def is_trade_day(date_str: str = "") -> bool | None:
 
 # ------------------------------------------------------------------ 数据获取
 def fetch_one(code: str) -> pd.DataFrame | None:
-    """拉取单只股票的前复权日线（最多重试 CFG['retry'] 次，失败返回 None）"""
+    """拉取单只股票的前复权日线（最多重试 CFG['retry'] 次，失败返回 None）
+
+    ★ 关键修复（2026-09-17 事故）：旧写法在拿到空数据时**直接 return None、不重试**。
+      而数据源限流的典型表现恰恰就是「返回空的 DataFrame」——于是被当成"这只股票
+      没数据"，一次失败即判死。实测全市场约一半股票因此丢失当日行情，进而让广度
+      基于半份数据计算。现在空结果同样走重试。
+    """
     import akshare as ak
     sym = to_sym(code)
     if sym is None:
         return None
-    for _ in range(CFG["retry"]):
+    for attempt in range(CFG["retry"]):
         try:
             d = ak.stock_zh_a_daily(symbol=sym, adjust="qfq")
             if d is None or d.empty or "close" not in d.columns:
-                return None
+                time.sleep(0.4 * (attempt + 1))     # 空结果多为限流 → 退避后重试
+                continue
             d = d.copy()
             d["code"] = str(code).zfill(6)
             keep = [c for c in ["date", "open", "high", "low", "close", "volume", "amount", "turnover", "code"]
                     if c in d.columns]
             return d[keep]
         except Exception:
-            time.sleep(0.4)
+            time.sleep(0.4 * (attempt + 1))
     return None
 
 
 def update_cache(codes: list[str], workers: int | None = None, verbose: bool = True,
-                 deadline_min: float = 45.0, progress=None) -> tuple[int, int]:
+                 deadline_min: float = 45.0, progress=None,
+                 retry_rounds: int = 2, expect_date: str | None = None) -> tuple[int, int]:
     """并发更新本地日线缓存。返回 (成功数, 失败数)
 
-    deadline_min: 抓取阶段的时间上限（分钟）。超时即放弃剩余任务，
+    deadline_min: 整个抓取阶段的时间上限（分钟）。超时即放弃剩余任务，
                   确保每日自动更新在任何网络异常下都能结束。
-    progress: 可选回调 progress(done, total, ok, fail)，用于把进度推给网页。
+    retry_rounds: 总轮数。第 1 轮抓全部；其后每轮只补抓上一轮未完成的股票。
+    expect_date:  期望拿到的「最新交易日」。数据源收盘后逐步更新，早跑时会有
+                  成批股票仍停留在前一交易日 —— 传入本参数，这些股票会被算作
+                  「本轮未完成」并交给补抓轮（详见 job_one 的说明）。
+    progress:     可选回调 progress(done, total, ok, fail)，用于把进度推给网页。
     """
     workers = workers or CFG["workers"]
-    ok = fail = 0
     t0 = time.time()
     total = len(codes)
-    ex = ThreadPoolExecutor(max_workers=workers)
-    try:
-        futs = {ex.submit(job_one, c): c for c in codes}
-        remain = max(t0 + deadline_min * 60 - time.time(), 1.0)
+    deadline = t0 + deadline_min * 60
+    ok = 0
+    pending = list(codes)
+
+    for rnd in range(max(1, retry_rounds)):
+        if not pending:
+            break
+        if rnd:
+            pause = max(0.0, min(8.0, deadline - time.time()))
+            if verbose:
+                print(f"  ↻ 补抓上一轮未完成的 {len(pending)} 只（先等 {pause:.0f} 秒让数据源喘息）…",
+                      flush=True)
+            if pause:
+                time.sleep(pause)
+
+        failed: list[str] = []
+        done_set: set[str] = set()
+        processed = 0
+        timed_out = False
+        ex = ThreadPoolExecutor(max_workers=workers)
         try:
-            for i, fu in enumerate(as_completed(futs, timeout=remain), 1):
-                c, n = fu.result()
-                if n:
-                    ok += 1
-                else:
-                    fail += 1
-                if progress is not None:
+            futs = {ex.submit(job_one, c, expect_date): c for c in pending}
+            remain = max(deadline - time.time(), 1.0)
+            try:
+                for fu in as_completed(futs, timeout=remain):
                     try:
-                        progress(i, total, ok, fail)
-                    except Exception:
-                        pass
-                if verbose and (i % 200 == 0 or i == total):
-                    el = time.time() - t0
-                    print(f"  更新进度 {i}/{total}  成功 {ok} 失败 {fail}  已用 {el/60:.1f} 分钟 "
-                          f"（预计还需 {(el/i)*(total-i)/60:.1f} 分钟）", flush=True)
-        except FutTimeout:
-            left = total - ok - fail
-            print(f"  ⚠️ 抓取超时（>{deadline_min:.0f} 分钟），放弃剩余 {left} 只："
-                  f"成功 {ok} 失败 {fail}", flush=True)
-            fail += left
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)   # 不等待挂死线程
-    return ok, fail
+                        c, n = fu.result()
+                    except Exception as e:
+                        # ★ 单只股票的意外异常（如写盘失败）绝不能中断整轮下载
+                        #   ——否则 as_completed 提前退出，剩余全部被 cancel_futures 取消。
+                        c, n = futs[fu], None
+                        if verbose:
+                            print(f"  ⚠️ {c} 抓取异常，已跳过：{type(e).__name__}: {e}", flush=True)
+                    done_set.add(c)
+                    processed += 1
+                    if n:
+                        ok += 1
+                    else:
+                        failed.append(c)
+                    if rnd == 0 and progress is not None:
+                        try:
+                            progress(processed, total, ok, len(failed))
+                        except Exception:
+                            pass
+                    if verbose and rnd == 0 and (processed % 200 == 0 or processed == total):
+                        el = time.time() - t0
+                        print(f"  更新进度 {processed}/{total}  成功 {ok} 失败 {len(failed)}  "
+                              f"已用 {el/60:.1f} 分钟（预计还需 "
+                              f"{(el/max(processed, 1))*(total-processed)/60:.1f} 分钟）", flush=True)
+            except FutTimeout:
+                timed_out = True
+                rest = [c for c in pending if c not in done_set]
+                if verbose:
+                    print(f"  ⚠️ 抓取超时（>{deadline_min:.0f} 分钟），放弃剩余 {len(rest)} 只："
+                          f"本轮成功 {processed - len(failed)} 失败 {len(failed)}", flush=True)
+                failed.extend(rest)
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)   # 不等待挂死线程
+
+        pending = failed
+        if timed_out:
+            break                    # 时间已耗尽，再补抓没有意义
+    return ok, len(pending)
 
 
-def job_one(code: str):
-    """单只抓取 + 落盘（update_cache 的工作单元）"""
+def job_one(code: str, expect_date: str | None = None):
+    """单只抓取 + 落盘（update_cache 的工作单元）
+
+    expect_date: 期望拿到的「最新交易日」，YYYY-MM-DD。
+      ★★ 2026-09-17 事故的真正根因就在这里。
+         数据源（新浪）在收盘后是**逐步更新**的：16:36 那次全市场 5017 只
+         全部「下载成功、零失败」，但其中约一半返回的最新日期仍停在前一交易日。
+         而旧实现只问「有没有拿到数据」，于是把**陈旧数据当成完整数据**，
+         广度就按半份样本算了 —— 全程无报错、无异常，日志一片正常。
+         传入 expect_date 后，数据没更新到该日期即视为「本轮未完成」，交给补抓轮
+         再试一次（全量下载本身要 10 分钟，走完时数据源往往已经补齐）。
+         不传该参数时行为与旧版完全一致。
+    """
     d = fetch_one(code)
     if d is None:
         return code, None
     p = os.path.join(DATA_DIR, f"{code}.csv")
-    d.to_csv(p, index=False, encoding="utf-8-sig")
+    d.to_csv(p, index=False, encoding="utf-8-sig")      # 陈旧数据也先落盘，总比没有好
+    if expect_date:
+        try:
+            latest = str(pd.to_datetime(d["date"], errors="coerce").max().date())
+        except Exception:
+            latest = ""
+        if latest < str(expect_date)[:10]:
+            return code, None                # 还没更新到今天 → 计入补抓
     return code, len(d)
 
 
@@ -515,8 +579,13 @@ def calc_breadth(data: pd.DataFrame, date: pd.Timestamp | None = None) -> dict:
     d = data[data["date"] == date]
     sig = d[signal_mask(d)]
     all_sig = d[d["bias"] <= CFG["bias_threshold"]]           # 仅乖离率条件，做参考
-    mb = sig["code"].map(is_main_board)
-    mb_all = all_sig["code"].map(is_main_board)
+    # ★ pandas 3.0 起 code 列是 str dtype。「当日 0 只达标」时 sig 为空，
+    #   空 Series 的 .map() 仍保留 str dtype，.sum() 会返回空字符串 ''
+    #   ——不是 0！——int('') 直接抛 ValueError，整个盘后任务崩在"算广度"这一步
+    #   （2026-09-17 那次就是这么炸的，且只在 0 只达标时才触发，极难复现）。
+    #   .eq(True) 无论空/非空、object/str dtype 都稳定得到布尔序列。
+    mb = sig["code"].map(is_main_board).eq(True)
+    mb_all = all_sig["code"].map(is_main_board).eq(True)
     th = CFG["breadth_threshold"]
     return dict(
         date=str(pd.Timestamp(date).date()),
@@ -539,7 +608,7 @@ def signal_rows(data: pd.DataFrame, date: pd.Timestamp | None = None,
     if board_only is None:
         board_only = bool(CFG.get("main_board_only", True))
     if board_only and not sig.empty:
-        sig = sig[sig["code"].map(is_main_board)]
+        sig = sig[sig["code"].map(is_main_board).eq(True)]
     return sig
 
 
@@ -563,7 +632,7 @@ def breadth_history(data: pd.DataFrame, days: int = 250) -> pd.DataFrame:
     """历史广度序列（用于画曲线）：每个交易日的广度 + 仅乖离率命中数 + 主板口径"""
     m = signal_mask(data)
     b_only = data["bias"] <= CFG["bias_threshold"]
-    mb = data["code"].map(is_main_board)
+    mb = data["code"].map(is_main_board).eq(True)   # 同 calc_breadth：强制布尔，防 str dtype
     hist = data.groupby("date").size().rename("total").to_frame()
     br = data[m].groupby("date").size().rename("breadth")
     bo = data[b_only].groupby("date").size().rename("bias_only")
