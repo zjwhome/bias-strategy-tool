@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import date, datetime
 
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -54,6 +54,42 @@ app = Flask(__name__, static_folder=None)
 
 # 后台"更新数据"按钮的运行态
 UPDATE_STATE = {"running": False, "last": None, "msg": "尚未更新"}
+
+
+def _int_arg(name: str, default: int, lo: int, hi: int) -> int:
+    """读一个整数查询参数：非法值回落到默认值，合法值夹到 [lo, hi]。
+
+    ★ 为什么必须有这道关：
+      ① 以前是直接 `int(request.args.get("days", 250))`，浏览器地址栏里
+         少打一个数字（?days=abc）就是 ValueError → HTTP 500，
+         页面上表现为「加载失败」而完全不知道为什么。
+      ② SQLite 的 `LIMIT -1` 意思是「**不限制**」而不是「0 条」——
+         传 ?days=-1 会一次性把整张 daily 表（几千行）读出来，
+         传 ?limit=-1 会把全部历史执行记录连同 7~9KB 的结果 JSON 一起返回。
+         所以下界必须夹到 1。
+      ③ 上界是防「?days=999999999」这类请求让 SQLite 白白铺全表。
+    """
+    raw = request.args.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        v = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
+def _bool_val(v) -> bool:
+    """把请求体里的开关值解析成布尔。
+
+    ★ 不能直接 `bool(v)`：Python 里 **`bool("false")` 是 True**。
+      前端传的是真正的布尔值（取自 input.checked），但控制台脚本 / curl
+      常常传字符串 `"false"`，那样「关闭定时」会被执行成「开启定时」——
+      而且界面上会显示成开启状态，用户完全看不出是被自己的传参坑了。
+    """
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on", "y", "t")
+    return bool(v)
 
 
 # ================================================================== 数据新鲜度探测
@@ -255,7 +291,8 @@ def api_today():
 
 @app.get("/api/history")
 def api_history():
-    days = int(request.args.get("days", 250))
+    # 容错 + 夹区间，见 _int_arg 的说明（非法值回落 250，负数会被夹成 1）
+    days = _int_arg("days", 250, 1, 5000)
     rows = db.get_daily_history(days)
     return jsonify(dict(ok=True, threshold=core.CFG["breadth_threshold"],
                         threshold_main=core.CFG.get("breadth_threshold_main"),
@@ -296,6 +333,21 @@ _REFRESH = dict(running=False, msg="", n=0, last_at=None, last_ok=None,
 _REFRESH_LOCK = threading.Lock()
 
 
+def _refresh_busy() -> bool:
+    """盘中「⟳ 实时更新」是否正在跑。
+
+    ★ 为什么必须**双向**互斥：
+      刷新侧（api_intraday_refresh）已经会挡「任务执行中」，
+      但任务侧以前完全不检查刷新。于是用户在「盘中参考」点完实时更新、
+      紧接着点「立即执行盘后任务」（或恰好撞上定时任务到点），
+      盘后任务就会在刷新正在读全市场 CSV 的同时重写这些 CSV ——
+      可能读到写了一半的文件，扫描结果会莫名少一批股票，
+      而且日志上一点异常都看不出来。两边的注释都写着"必须互斥"，实际只做了半边。
+    """
+    with _REFRESH_LOCK:
+        return bool(_REFRESH["running"])
+
+
 def _refresh_worker(data_date: str) -> None:
     t0 = time.time()
 
@@ -331,6 +383,11 @@ def api_intraday_refresh():
         _REFRESH["running"] = True        # ★ 同一把锁内「检查 + 占位」，防并发重入
     try:
         busy = [k for k in tasks.TASK_KEYS if tasks.STATE[k]["running"]]
+        # ★ 「更新数据」按钮走的是另一条通道：它先把 UPDATE_STATE["running"] 置位，
+        #   再起线程去跑盘后任务 —— 中间那一瞬 tasks.STATE 还全是 False。
+        #   不认这个标志，刷新恰好落进那一瞬就会和盘后任务撞上（它马上要重写 CSV）。
+        if not busy and UPDATE_STATE.get("running"):
+            busy = ["postmarket"]
         if not busy:
             # 跨进程：控制台窗口可能正在跑任务，它的状态在另一个进程里
             try:
@@ -400,12 +457,22 @@ def api_add_holding():
     if buy_price <= 0:
         return jsonify(dict(ok=False, msg="买入价必须大于 0")), 400
 
-    # ★ 校验日期格式，避免脏数据导致持有天数计算异常
+    # ★ 校验并**归一化**买入日期。这里有两个坑：
+    #   ① strptime 会宽松接受 '2026-9-16'（月/日不补零），它确实能过校验，
+    #      但存到库里就是 '2026-9-16'；而持仓列表是 `ORDER BY buy_date DESC`
+    #      按**字符串**排的 —— '2026-9-16' > '2026-10-01'（因为 '9' > '1'），
+    #      排序会直接错位。所以先 strftime 成零补位的标准写法再入库。
+    #   ② 允许未来日期（手滑打成 2027）会让「已持有 N 天」变成负数，
+    #      止损/止盈的持有期判断全部失准 → 在入口挡掉。
     buy_date = str(j["buy_date"]).strip()
     try:
-        datetime.strptime(buy_date, "%Y-%m-%d")
+        bd = datetime.strptime(buy_date, "%Y-%m-%d").date()
     except ValueError:
-        return jsonify(dict(ok=False, msg="买入日期格式应为 YYYY-MM-DD")), 400
+        return jsonify(dict(ok=False, msg="买入日期格式应为 YYYY-MM-DD，例如 2026-09-16")), 400
+    buy_date = bd.strftime("%Y-%m-%d")
+    if bd > date.today():
+        return (jsonify(dict(ok=False, msg=f"买入日期 {buy_date} 还没到"
+                                          f"（今天是 {date.today():%Y-%m-%d}）")), 400)
 
     try:
         shares = int(j.get("shares") or 0)
@@ -421,6 +488,17 @@ def api_add_holding():
 
 @app.post("/api/holdings/<int:hid>/close")
 def api_close_holding(hid):
+    # ★ 先确认这条记录真的存在、且确实还在持仓中。
+    #   以前是「先无脑执行、再无条件返回 ok:true」——
+    #   对一个不存在的 id（页面开着没刷新、记录已在另一个标签页被删）也会回"成功"，
+    #   用户以为平仓了，刷新后记录原样躺在那里；
+    #   如果是重复提交，还会把已经写好的卖出日期/价格**静默改写**掉。
+    #   这类"假成功"是最难排查的一类缺陷：界面全绿，数据没动。
+    h = db.get_holding(hid)
+    if not h:
+        return jsonify(dict(ok=False, msg="找不到这条持仓记录（可能已被删除）")), 404
+    if h.get("status") != "holding":
+        return jsonify(dict(ok=False, msg="这条持仓已经是平仓状态了")), 409
     j = request.get_json(force=True, silent=True) or {}
     try:
         sp = float(j.get("sell_price") or 0)
@@ -430,16 +508,34 @@ def api_close_holding(hid):
         return jsonify(dict(ok=False, msg="卖出价必须大于 0")), 400
     sd = str(j.get("sell_date") or datetime.now().strftime("%Y-%m-%d")).strip()
     try:
-        datetime.strptime(sd, "%Y-%m-%d")
+        sdd = datetime.strptime(sd, "%Y-%m-%d").date()
     except ValueError:
         return jsonify(dict(ok=False, msg="卖出日期格式应为 YYYY-MM-DD")), 400
-    db.close_holding(hid, sd, sp, j.get("reason", "手动平仓"))
+    sd = sdd.strftime("%Y-%m-%d")       # 归一化，见新增持仓处的说明
+    if sdd > date.today():
+        return jsonify(dict(ok=False, msg=f"卖出日期 {sd} 还没到")), 400
+    # ★ 卖出不可能早于买入：早于买入会算出负的持有天数，出场复盘全乱。
+    #   这里按「解析后的日期」比，不按字符串比 —— 老记录可能是 '2026-9-16'
+    #   这种非零补位写法，字符串比较会给出错误结论。
+    try:
+        bdd = datetime.strptime(str(h.get("buy_date") or ""), "%Y-%m-%d").date()
+    except ValueError:
+        bdd = None
+    if bdd and sdd < bdd:
+        return (jsonify(dict(ok=False,
+                             msg=f"卖出日期 {sd} 早于买入日期 {bdd:%Y-%m-%d}，请检查")), 400)
+    if not db.close_holding(hid, sd, sp, j.get("reason", "手动平仓")):
+        # 正常到不了这里（上面已校验过状态），但并发下仍可能被抢先平掉
+        return jsonify(dict(ok=False, msg="这条持仓刚刚已被平仓，请刷新页面")), 409
     return jsonify(dict(ok=True))
 
 
 @app.delete("/api/holdings/<int:hid>")
 def api_delete_holding(hid):
-    db.delete_holding(hid)
+    # ★ 不存在时回 404，而不是 ok:true。删除是最需要"确实删掉了"的动作，
+    #   回一个假成功会让用户反复点击、却找不到问题出在哪。
+    if not db.delete_holding(hid):
+        return jsonify(dict(ok=False, msg="找不到这条持仓记录（可能已被删除）")), 404
     return jsonify(dict(ok=True))
 
 
@@ -455,6 +551,11 @@ def api_tasks():
 def api_task_run(key):
     if key not in tasks.TASK_KEYS:
         return jsonify(dict(ok=False, msg="未知任务")), 404
+    # ★ 反向闸门：见 _refresh_busy 的说明。实时更新只跑几秒，
+    #   等它一下比让盘后任务读到写了一半的 CSV 划算得多。
+    if _refresh_busy():
+        return jsonify(dict(ok=False,
+                            msg="「盘中参考」的实时更新正在跑，等它结束（通常几秒）再执行。"))
     busy = [k for k in tasks.TASK_KEYS if tasks.STATE[k]["running"]]
     if not busy:
         # ★ 跨进程检查：控制台窗口可能正在跑任务，它的状态在另一个进程里
@@ -474,15 +575,38 @@ def api_task_schedule(key):
     if key not in tasks.TASK_KEYS:
         return jsonify(dict(ok=False, msg="未知任务")), 404
     j = request.get_json(force=True, silent=True) or {}
-    enabled = bool(j.get("enabled"))
-    at_time = (j.get("at_time") or tasks.TASK_DEFS[key]["suggest"]).strip()
-    days = (j.get("days") or "1,2,3,4,5").strip()
+    enabled = _bool_val(j.get("enabled"))
+    # ★ 一律先 str() 再 strip()：body 里把 at_time 写成数字（{"at_time":1535}）
+    #   或 days 写成数组时，直接 .strip() 会抛 AttributeError → 500。
+    at_time = str(j.get("at_time") or tasks.TASK_DEFS[key]["suggest"]).strip()
+    raw_days = str(j.get("days") if j.get("days") is not None else "").strip()
     # 校验时间格式
     try:
         hh, mm = [int(x) for x in at_time.split(":")]
         assert 0 <= hh <= 23 and 0 <= mm <= 59
     except Exception:
         return jsonify(dict(ok=False, msg="时间格式应为 HH:MM，例如 15:35")), 400
+    # ★ 校验星期：只接受 1~7（1=周一），去重后按数字排序。
+    #   以前这里完全不校验，{"days":"9,x"} 会被原样存库 —— 而调度器是按
+    #   `today in days.split(",")` 匹配的，非法值永远匹配不上：
+    #   定时**静默地永不触发**，界面上却还老老实实显示「每天 15:35」。
+    #   顺手把中文逗号也认掉（用户从文档里复制的多是全角）。
+    parts = [p.strip() for p in raw_days.replace("，", ",").split(",") if p.strip()]
+    bad = [p for p in parts if p not in ("1", "2", "3", "4", "5", "6", "7")]
+    if bad:
+        return (jsonify(dict(ok=False, msg="星期只能填 1~7 的数字（1=周一），"
+                                           f"收到：{'、'.join(bad[:5])}")), 400)
+    days = ",".join(sorted(set(parts), key=int))
+    if not days:
+        if enabled:
+            # ★ 开启定时却一天都没勾 = 一条永远不会触发的规则。
+            #   前端已经拦了，但**接口才是真正的关口**（控制台/脚本也打这里）。
+            return jsonify(dict(ok=False, msg="开启定时时，请至少勾选一个星期。")), 400
+        # 关闭定时时没勾任何一天 → 保留库里原来的星期（顺手滤掉历史脏值），
+        # 免得"关一次就把星期清空"，下次想开启还得把七天重新勾一遍。
+        prev = str(((db.get_task_settings().get(key) or {}).get("days")) or "")
+        days = ",".join(d for d in prev.replace(" ", "").split(",")
+                        if d in ("1", "2", "3", "4", "5", "6", "7")) or "1,2,3,4,5"
     db.set_task_setting(key, enabled, f"{hh:02d}:{mm:02d}", days)
     return jsonify(dict(ok=True, enabled=enabled, at_time=f"{hh:02d}:{mm:02d}", days=days,
                         msg=("定时已开启" if enabled else "定时已关闭")))
@@ -490,7 +614,12 @@ def api_task_schedule(key):
 
 @app.get("/api/tasks/<key>/runs")
 def api_task_runs(key):
-    limit = int(request.args.get("limit", 20))
+    # ★ 与 /run、/schedule 对齐：未知任务键直接 404，而不是"空列表 + ok:true"。
+    #   静默返回空集会让调用方以为「这个任务没跑过」，而不是「键写错了」。
+    if key not in tasks.TASK_KEYS:
+        return jsonify(dict(ok=False, msg="未知任务")), 404
+    # 容错 + 夹区间：每条记录含 7~9KB 结果 JSON，上界 200 与之匹配
+    limit = _int_arg("limit", 20, 1, 200)
     rows = db.get_task_runs(key, limit=limit)
     rows.reverse()                       # 旧 → 新，方便前端展示
     return jsonify(dict(ok=True, runs=rows))
@@ -498,6 +627,8 @@ def api_task_runs(key):
 
 @app.get("/api/tasks/<key>/result/<int:run_id>")
 def api_task_result(key, run_id):
+    if key not in tasks.TASK_KEYS:
+        return jsonify(dict(ok=False, msg="未知任务")), 404
     rows = [r for r in db.get_task_runs(key, limit=200) if r["id"] == run_id]
     if not rows:
         return jsonify(dict(ok=False, msg="找不到该次执行记录")), 404
@@ -523,6 +654,12 @@ def api_update():
     #   于是本函数返回、而线程还没被调度的那一瞬间，/api/status 仍回报
     #   updating=False —— 前端的轮询一旦落在这一瞬，就会立刻判定「已完成」、
     #   停掉轮询并去 loadAll()（拿到的是旧数据），此后这个页面再也不会自动刷新。
+    # ★ 反向闸门：实时更新正在读全市场 CSV 时，不能同时去重写它（见 _refresh_busy）。
+    #   放在取 _UPDATE_LOCK **之前**：避免"持着 _UPDATE_LOCK 再取 _REFRESH_LOCK"，
+    #   与刷新线程的加锁顺序保持一致，杜绝死锁的可能。
+    if _refresh_busy():
+        return jsonify(dict(ok=False,
+                            msg="「盘中参考」的实时更新正在跑，等它结束（通常几秒）再更新。"))
     with _UPDATE_LOCK:
         if UPDATE_STATE["running"] or any(tasks.STATE[k]["running"] for k in tasks.TASK_KEYS):
             return jsonify(dict(ok=False, msg="已有任务在运行中"))
@@ -618,6 +755,11 @@ def _scheduler_loop():
                     continue
                 # 同一时刻只允许一个任务在跑（本进程 + 跨进程都要检查）
                 if any(tasks.STATE[k]["running"] for k in tasks.TASK_KEYS):
+                    continue
+                # ★ 盘中「实时更新」正在读全市场 CSV 时也不能开跑（见 _refresh_busy）。
+                #   跳过是安全的：本循环 20 秒一轮，而刷新只跑几秒；
+                #   万一真的拖久了，GRACE_MIN 的 60 分钟宽限窗口还兜得住。
+                if _refresh_busy():
                     continue
                 try:
                     if db.has_running_task():        # ★ 控制台进程可能正在跑

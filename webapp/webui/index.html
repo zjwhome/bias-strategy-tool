@@ -47,14 +47,20 @@
   --font-mono:ui-monospace,"Cascadia Mono","SF Mono","JetBrains Mono",Consolas,
     "Liberation Mono",Menlo,monospace;
 
-  /* --- 字号阶梯（App 界面用固定 rem，不用流体；少而对比强） --- */
-  --t-xs:.75rem;      /* 12 · 角标 / 表头 / 标签 */
-  --t-sm:.8125rem;    /* 13 · 辅助信息 / 卡片标题 */
-  --t-md:.875rem;     /* 14 · 表格数字 */
-  --t-base:1rem;      /* 16 · 正文 */
-  --t-lg:1.125rem;    /* 18 · 品牌标题 */
-  --t-xl:1.3125rem;   /* 21 · 结论大字 */
-  --t-hero:clamp(2.75rem,9vw,3.5rem);  /* 唯一允许流体的一处 */
+  /* --- 字号阶梯（App 界面用固定 rem，不用流体；少而对比强） ---
+     ★ 2026-09-17 重排。起因：实测卡片标题只有 13px/700，**比正文（16px）还小**，
+       于是每张卡片都"没有名字"，整页看起来像一堆数字摊在纸上 —— 这是"不好看"
+       最直接的成因。同时结论大字 21px 小于页面标题 24px，最重要的东西反而不显眼。
+     现在的规矩：答案 > 页面标题 > 卡片标题 > 正文 > 辅助。层级一顺，观感立刻成立。 */
+  --t-xs:.75rem;      /* 12   · 角标 / 表头 / 极小辅助 */
+  --t-sm:.8125rem;    /* 13   · 次级辅助 / 卡片标题旁的 tag */
+  --t-md:.875rem;     /* 14   · 正文小号 / 表格 */
+  --t-base:.9375rem;  /* 15   · 正文 */
+  --t-card:1rem;      /* 16   · 卡片标题（★ 必须 ≥ 正文，否则"没名字"） */
+  --t-lg:1.125rem;    /* 18   · 品牌标题 */
+  --t-xl:1.3125rem;   /* 21   · 指标数值 */
+  --t-answer:clamp(1.5rem,3.1vw,1.875rem);  /* 24~30 · 答案（全页最大） */
+  --t-hero:clamp(2.75rem,9vw,3.5rem);       /* 保留给个别大数字 */
 
   --lh-tight:1.25; --lh-base:1.6;
 
@@ -273,7 +279,7 @@ body{
 :focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:3px}
 
 /* 主题切换的过渡：只作用于颜色，且不覆盖各组件自己的 transform/box-shadow 过渡 */
-body,header,.card,.kv,.banner,.gauge,.conclusion,.empty-mark,input[type=time]{
+body,header,.card,.meters,.stat,.banner,.empty-mark,input[type=time]{
   transition:background-color var(--dur-2) var(--ease),
              border-color var(--dur-2) var(--ease),
              color var(--dur-2) var(--ease);
@@ -287,14 +293,19 @@ header{position:sticky;top:0;z-index:20;background:var(--surface);
   border-bottom:1px solid var(--line);
   padding-top:env(safe-area-inset-top)}
 .hdr{display:flex;align-items:center;justify-content:space-between;
-  gap:var(--s-4);flex-wrap:wrap;padding-block:var(--s-4)}
+  gap:var(--s-4);flex-wrap:wrap;padding-block:var(--s-3)}
 .brand{display:flex;align-items:center;gap:var(--s-3);min-width:0}
-.brand-mark{display:grid;place-items:center;flex:0 0 auto;width:34px;height:34px;
-  border-radius:10px;background:var(--brand);color:var(--on-brand);
+.brand-mark{display:grid;place-items:center;flex:0 0 auto;width:32px;height:32px;
+  border-radius:9px;background:var(--brand);color:var(--on-brand);
   box-shadow:0 2px 10px var(--brand-ring)}
-.brand-title{margin:0;font-size:var(--t-lg);font-weight:700;letter-spacing:-.01em;
-  line-height:1.2;text-wrap:balance}
-.brand-sub{margin:1px 0 0;font-size:var(--t-sm);color:var(--ink-3)}
+/* ★ 副题从"第二行"改成"同一行、用竖线分隔"：少一行 = 顶栏少 22px。
+   实测旧顶栏 76px 且 sticky，等于常驻吃掉 7.6% 的屏幕高度 ——
+   对一个每天开一次的工具来说，页头比第一张卡还高是浪费。现在 56px。 */
+.brand-title{margin:0;font-size:1.0625rem;font-weight:700;letter-spacing:-.012em;
+  line-height:1.25;white-space:nowrap}
+.brand-sub{margin:0;padding-left:var(--s-3);border-left:1px solid var(--line);
+  font-size:var(--t-xs);color:var(--ink-3);line-height:1.5;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hdr-right{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap}
 .hdr-meta{font-size:var(--t-sm);color:var(--ink-3);text-align:right;line-height:1.5}
 .hdr-meta b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
@@ -325,9 +336,12 @@ header{position:sticky;top:0;z-index:20;background:var(--surface);
    ========================================================================== */
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
   box-shadow:var(--shadow-1);padding:var(--s-5) var(--s-6);margin-bottom:var(--s-5)}
+/* ★ 卡片标题从 13px/letter-spacing:.03em 改到 16px/正常字距：
+   旧值让它看起来像"表格的表头标签"而不是"这张卡叫什么"，
+   于是卡片之间没有分界、整页像一张连续的数字报表。 */
 .card>h2{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;
-  margin:0 0 var(--s-4);font-size:var(--t-sm);font-weight:700;
-  letter-spacing:.03em;color:var(--ink-2)}
+  margin:0 0 var(--s-4);font-size:var(--t-card);font-weight:700;
+  letter-spacing:-.012em;line-height:1.35;color:var(--ink)}
 .card>h2 .tag{font-size:var(--t-xs);font-weight:500;letter-spacing:0;color:var(--ink-3);
   background:var(--surface-2);border:1px solid var(--line);
   border-radius:var(--r-pill);padding:2px 9px;font-variant-numeric:tabular-nums}
@@ -342,39 +356,84 @@ header{position:sticky;top:0;z-index:20;background:var(--surface);
 .pane>.card:nth-of-type(3){animation-delay:.10s}
 
 /* ==========================================================================
-   6 · 今日结论（hero）
+   6 · 结论区（hero）— 全页唯一的"答案"
+   --------------------------------------------------------------------------
+   ★ 为什么重做：旧版是「208px 宽的大数字仪表盘 + 7 个等权小胶囊」。
+     两处硬伤 ——
+       ① 层级倒挂：仪表盘里的数字 56px，而真正的答案（今天动不动手）只有 21px。
+          用户得先读数字 → 再找门槛 → 再自己比较，才能得出结论。工具应该替他算完。
+       ② 无主次：7 个胶囊同款同样大，换行后第二行右边空 470px；
+          而他唯一能买的「沪深主板」排在第 5、6 位。
+     现在：短答案当主角 → 两把尺子并排（现值 / 门槛 / 进度条，差多少用条的长短说话）
+          → 其余细节压成一行小字。首屏 3 秒能读完一次决策。
    ========================================================================== */
-.verdict{display:grid;grid-template-columns:minmax(168px,208px) 1fr;gap:var(--s-5)}
-.gauge{position:relative;display:flex;flex-direction:column;justify-content:center;
-  text-align:center;border-radius:var(--r-lg);padding:var(--s-5) var(--s-4);
-  background:var(--surface-2);border:1px solid var(--line)}
-.gauge .num{display:block;font-family:var(--font-mono);
-  font-size:var(--t-hero);font-weight:700;line-height:1;letter-spacing:-.035em;
-  font-variant-numeric:tabular-nums;color:var(--ink)}
-.gauge .lab{margin-top:var(--s-3);font-size:var(--t-xs);letter-spacing:.04em;color:var(--ink-3)}
-.gauge .th{margin-top:var(--s-2);padding-top:var(--s-2);border-top:1px solid var(--line);
-  font-size:var(--t-xs);color:var(--ink-3)}
-/* 达标＝该出手：整页唯一允许大面积高饱和色的地方 */
-.gauge.is-hot{background:var(--alert-bg);border-color:transparent;
-  box-shadow:0 6px 26px var(--up-ring)}
-.gauge.is-hot .num{color:var(--alert-ink)}
-.gauge.is-hot .lab,.gauge.is-hot .th{color:oklch(100% 0 0 / .92)}
-.gauge.is-hot .th{border-top-color:oklch(100% 0 0 / .32)}
 
-.verdict-body{display:flex;flex-direction:column;justify-content:center;gap:var(--s-4);min-width:0}
-.conclusion{border:1px solid var(--line);border-left-width:4px;border-radius:var(--r-md);
-  background:var(--surface-2);padding:var(--s-4) var(--s-4);
-  font-size:var(--t-xl);font-weight:700;line-height:1.35;letter-spacing:-.01em;
-  text-wrap:balance;color:var(--ink)}
-.conclusion.act-ok{background:var(--up-soft);border-color:var(--up-ring);
-  border-left-color:var(--up);color:var(--up)}
-.conclusion.act-no{background:var(--surface-2);border-color:var(--line);
-  border-left-color:var(--line-2);color:var(--ink-2)}
+/* 两栏：答案 | 论据。窄屏（<900px）叠成上下，答案仍然第一眼。 */
+.hero-grid{display:grid;grid-template-columns:minmax(240px,.85fr) minmax(320px,1.15fr);
+  gap:var(--s-6);align-items:center}
+@media (max-width:900px){.hero-grid{grid-template-columns:1fr;gap:var(--s-5)}}
+.hero-answer{min-width:0}
 
-.meta{display:flex;gap:var(--s-2);flex-wrap:wrap}
-.kv{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);
-  padding:var(--s-2) var(--s-3);font-size:var(--t-sm);color:var(--ink-3);white-space:nowrap}
-.kv b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+/* 答案：整页字号最大的元素。它可以比页面标题还大 —— 它比页面标题重要。 */
+.answer{margin:0;font-size:var(--t-answer);font-weight:800;line-height:1.2;
+  letter-spacing:-.022em;text-wrap:balance;color:var(--ink-2)}
+.answer.act-ok{color:var(--up)}
+.answer-sub{margin:var(--s-3) 0 0;font-size:var(--t-md);line-height:1.7;
+  color:var(--ink-3);text-wrap:pretty}
+.answer-sub b{color:var(--ink-2);font-weight:700;font-variant-numeric:tabular-nums}
+
+/* 一行一条指标：标签在左、数值在右、进度条通栏。
+   ★ 从"三行竖排"压成"两行"的原因：旧版每条尺子占 65px，两条 183px，
+     而结论区总高被它顶到 322px —— 1000px 的屏幕上，光"解释为什么不动手"
+     就吃掉三分之一。压成指标行后每条 40px，结论区回到 ~267px，
+     信息一个没少，只是不再各占一行。 */
+.meters{display:grid;gap:var(--s-3);padding:var(--s-3) var(--s-4);
+  background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-md);
+  min-width:0}
+.ruler{display:grid;grid-template-columns:minmax(0,1fr) auto;
+  align-items:baseline;gap:8px var(--s-3);min-width:0}
+.ruler+.ruler{padding-top:var(--s-3);border-top:1px solid var(--line)}
+.ruler .r-k{grid-column:1;display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;
+  font-size:var(--t-xs);font-weight:700;letter-spacing:.02em;color:var(--ink-2)}
+.ruler .r-k em{font-style:normal;font-weight:500;color:var(--ink-3)}
+.ruler .r-v{grid-column:2;display:flex;align-items:baseline;justify-content:flex-end;
+  gap:var(--s-2);flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.ruler .r-v b{font-family:var(--font-mono);font-size:1.5rem;font-weight:700;
+  line-height:1;letter-spacing:-.03em;color:var(--ink)}
+.ruler .r-v s{text-decoration:none;font-size:var(--t-sm);font-weight:600;color:var(--ink-3)}
+/* 「还差多少 / 已达标」：把结论写在数字右边。
+   ★ 不给这句，那条几乎全空的进度条会被读成"数字的下划线"（实测观感确认）。 */
+.ruler .r-v u{display:none;text-decoration:none;padding-left:var(--s-3);
+  margin-left:var(--s-1);border-left:1px solid var(--line);
+  font-size:var(--t-xs);font-weight:700;color:var(--ink-3);white-space:nowrap}
+@media (min-width:620px){.ruler .r-v u{display:block}}
+/* 进度条：把「离门槛还差多少」从数字比较变成一条长度。
+   ★ 内层 <i> 由 JS 写 width，上限锁 100%（广度 199 对门槛 50 时不能画出 400%）。
+   ★ <em> 是"门槛刻度"：刻在轨道右端。第一版只有一条几乎全空的轨道，
+     视觉上被读成"数字下面的一条装饰线"；加了右端的刻度 + 「还差 N 只」，
+     它才明确地是一条"离目标还有多远"的尺子。
+   ★ 不加 overflow:hidden（会裁掉刻度），改成给 <i> 自己圆角。 */
+.ruler .r-bar{grid-column:1 / -1;position:relative;height:6px;
+  border-radius:var(--r-pill);background:var(--surface-3)}
+.ruler .r-bar i{display:block;height:100%;width:0;border-radius:var(--r-pill);
+  background:var(--ink-3);transition:width var(--dur-3) var(--ease)}
+.ruler .r-bar em{position:absolute;right:0;top:-3px;bottom:-3px;width:2px;
+  border-radius:2px;background:var(--line-2)}
+/* 已达标：把这条染成 --up（涨色）—— 全套配色里"出手"只用这一个颜色，稀缺才醒目 */
+.ruler.is-hot .r-bar i{background:var(--up)}
+.ruler.is-hot .r-v b{color:var(--up)}
+.ruler.is-hot .r-v u{color:var(--up)}
+/* 「沪深主板」是用户唯一能买的池子。★ 用一枚品牌色小胶囊标身份，而不是左竖条 ——
+   左竖条在一个有内边距的面板里很难对齐，胶囊跟着文字走，永远不会错位。 */
+.ruler.mine .r-k em{color:var(--brand-ink);background:var(--brand-soft);
+  border-radius:var(--r-pill);padding:1px 7px;font-weight:700}
+
+/* 细节行：不重要的信息全部降到 12px 一行 —— 需要时能查到，但不抢注意力 */
+.hero-meta{display:flex;gap:2px var(--s-3);flex-wrap:wrap;align-items:baseline;
+  margin:var(--s-5) 0 0;padding-top:var(--s-4);border-top:1px solid var(--line);
+  font-size:var(--t-xs);line-height:1.85;color:var(--ink-3)}
+.hero-meta b{color:var(--ink-2);font-weight:700;font-variant-numeric:tabular-nums}
+.hero-meta .sep{color:var(--line-2)}
 
 /* ==========================================================================
    7 · 表格
@@ -390,7 +449,9 @@ tbody tr:last-child td{border-bottom:0}
 @media (hover:hover){tbody tr:hover{background:var(--surface-2)}}
 th:first-child,td:first-child{text-align:left}
 td.num{font-variant-numeric:tabular-nums}
-td.code{font-family:var(--font-mono);font-size:var(--t-xs);letter-spacing:-.01em;color:var(--ink-2)}
+/* 代码列：6 位数字要一眼分辨，12px 偏小（实测每天扫表的主战场就是这一列）*/
+td.code{font-family:var(--font-mono);font-size:var(--t-sm);letter-spacing:-.01em;
+  color:var(--ink-2);font-weight:600}
 .up{color:var(--up);font-weight:600}
 .down{color:var(--down);font-weight:600}
 .mut{color:var(--ink-3)}
@@ -429,14 +490,26 @@ table.hold .days-over{color:var(--warn);font-weight:700}
 
 /* ==========================================================================
    9 · 空状态（这套策略 95% 的时间都停在这里，必须像「有意为之」而不像「坏了」）
+   --------------------------------------------------------------------------
+   ★ 从「居中大留白」改成「紧凑横条」。实测旧版：1066×160px 的格子里
+     只放了 38 个汉字（填料率 0.2），而它出现在首屏第二张卡里 —— 等于用
+     六分之一的首屏高度告诉用户"今天没事"。这对每天都来的用户是纯浪费。
+   现在它是一条 30px 图标 + 两行文字 + 可选的行动按钮，左对齐、可扫读。
    ========================================================================== */
-.empty{display:flex;flex-direction:column;align-items:center;text-align:center;
-  padding:var(--s-8) var(--s-4);color:var(--ink-3)}
-.empty-mark{display:grid;place-items:center;width:38px;height:38px;border-radius:50%;
-  background:var(--surface-2);border:1px solid var(--line);
-  color:var(--ink-3);font-size:var(--t-base);margin-bottom:var(--s-3)}
-.empty-title{margin:0;font-size:var(--t-sm);font-weight:700;color:var(--ink-2)}
-.empty-note{margin:var(--s-1) 0 0;font-size:var(--t-sm);line-height:1.65;max-width:46ch}
+.empty{display:grid;grid-template-columns:auto minmax(0,1fr) auto;
+  align-items:start;gap:2px var(--s-3);
+  padding:var(--s-4);text-align:left;
+  background:var(--surface-2);border:1px dashed var(--line);border-radius:var(--r-md);
+  color:var(--ink-3)}
+.empty-mark{grid-row:1 / span 2;align-self:start;display:grid;place-items:center;
+  width:30px;height:30px;border-radius:50%;margin:0;
+  background:var(--surface);border:1px solid var(--line);
+  color:var(--ink-3);font-size:var(--t-sm)}
+.empty-title{grid-column:2;align-self:center;margin:0;
+  font-size:var(--t-base);font-weight:700;color:var(--ink-2)}
+.empty-note{grid-column:2;margin:0;font-size:var(--t-sm);
+  line-height:1.7;max-width:74ch}
+.empty>.btn{grid-column:3;grid-row:1 / span 2;align-self:center;margin:0}
 
 /* ==========================================================================
    10 · 提示条
@@ -505,6 +578,9 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .lg-bar{background:var(--brand)}
 .lg-th{background:var(--warn)}
 .legend .mini{margin-left:auto}
+/* 「有 N 天超出坐标上限」：用 warn 色提示坐标被裁过，别让读者以为
+   顶部那根就是历史最高。 */
+.legend .clip{margin-left:auto;font-size:var(--t-xs);font-weight:600;color:var(--warn)}
 
 /* ==========================================================================
    12 · 任务坞内部（进度条 / 上次执行 / 历史记录）
@@ -630,11 +706,36 @@ footer b{color:var(--ink-2)}
 .nav-dot.hot{background:var(--up);box-shadow:0 0 0 3px var(--up-ring)}
 .nav-dot.warn{background:var(--warn);
   box-shadow:0 0 0 3px color-mix(in oklab,var(--warn) 26%,transparent)}
-.nav-hint{display:none}
+/* ---- 侧栏帮助：默认收起 ----
+   ★ 旧版是一段 3 行常驻的说明文字。它是"第一次看才知道"的内容，
+     对每天开一次的老用户纯属占位 —— 而侧栏正是最不该被占位的地方。
+     改成默认收起的折叠区：需要时展开，3 秒读完。 */
+.nav-help{display:none}
+@media (min-width:1000px){
+  .nav-help{display:block;margin-top:var(--s-5)}
+}
+.nav-help>summary{display:flex;align-items:center;gap:6px;cursor:pointer;
+  list-style:none;padding:5px var(--s-3);border-radius:var(--r-sm);
+  font-size:var(--t-xs);font-weight:600;color:var(--ink-3);
+  transition:background-color var(--dur-1) var(--ease),color var(--dur-1) var(--ease)}
+.nav-help>summary::-webkit-details-marker{display:none}
+.nav-help>summary::after{content:"▾";margin-left:auto;font-size:10px;
+  transition:transform var(--dur-2) var(--ease)}
+.nav-help[open]>summary::after{transform:rotate(180deg)}
+@media (hover:hover){.nav-help>summary:hover{background:var(--surface-2);color:var(--ink-2)}}
+.nav-help ul{margin:var(--s-2) 0 0;padding:0 var(--s-3);list-style:none;
+  font-size:var(--t-xs);line-height:1.7;color:var(--ink-3)}
+.nav-help li{display:flex;gap:7px;align-items:flex-start;padding:3px 0}
+.nav-help li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:7px;
+  border-radius:50%;background:var(--line-2)}
+.nav-help li.hot::before{background:var(--up);box-shadow:0 0 0 2px var(--up-ring)}
+.nav-help li.warn::before{background:var(--warn);
+  box-shadow:0 0 0 2px color-mix(in oklab,var(--warn) 26%,transparent)}
+.nav-help b{color:var(--ink-2);font-weight:700}
 
 /* 窄屏：菜单退化为粘顶的横向标签条，不占首屏高度、又随时可切换 */
 @media (max-width:999px){
-  .nav{position:sticky;top:var(--hdr-h,72px);z-index:15;background:var(--bg);
+  .nav{position:sticky;top:var(--hdr-h,60px);z-index:15;background:var(--bg);
     margin-inline:calc(var(--s-5) * -1);padding-inline:var(--s-5);
     padding-block:var(--s-2);margin-bottom:var(--s-3);
     border-bottom:1px solid var(--line);
@@ -647,13 +748,10 @@ footer b{color:var(--ink-2)}
    不靠"更亮的背景"（深色主题下会糊成一片）。 */
 @media (min-width:1000px){
   .nav{flex-direction:column;overflow:visible;position:sticky;z-index:15;
-    top:calc(var(--hdr-h,78px) + var(--s-5));margin-bottom:0}
+    top:calc(var(--hdr-h,60px) + var(--s-5));margin-bottom:0}
   .nav-i{width:100%}
   .nav-i[aria-selected="true"]::before{content:"";position:absolute;left:-1px;
     top:9px;bottom:9px;width:3px;border-radius:3px;background:var(--brand)}
-  .nav-hint{display:block;margin-top:var(--s-5);padding:0 var(--s-3);
-    font-size:var(--t-xs);line-height:1.75;color:var(--ink-3)}
-  .nav-hint b{color:var(--ink-2);font-weight:700}
 }
 
 /* ---- 子标签（分区内部的分段开关） ---- */
@@ -718,13 +816,8 @@ details.hform-w>summary::-webkit-details-marker{display:none}
 details.hform-w>summary::before{content:"＋ "}
 details.hform-w[open]>summary::before{content:"－ "}
 
-/* 菜单角标口径的关键数字（沪深主板达标等）在「今日结论」里要高亮出来 ——
-   用户只能买主板，全市场数字再大也和他无关。 */
-.kv.hot{background:var(--up-soft);border-color:var(--up-ring);color:var(--up)}
-.kv.hot b{color:var(--up)}
-
-/* 空状态里的行动按钮（例如「盘中参考」为空时的一键执行），居中留白 */
-.empty>.btn{margin-top:var(--s-4)}
+/* 空状态里的行动按钮：位置由 §9 的 grid 决定（第三列、垂直居中），
+   这里不再单独给外边距 —— 否则会把它顶下去、撑高整条空状态。 */
 
 /* ==========================================================================
    16 · 响应式
@@ -732,20 +825,22 @@ details.hform-w[open]>summary::before{content:"－ "}
    断点按内容需要设定（640 / 760 / 900），不是照搬设备尺寸。
    小屏时宽表格改为「卡片」而非横向滚动，避免把关键列推出视口。
    ========================================================================== */
-@media (max-width:900px){
-  .verdict{grid-template-columns:minmax(150px,178px) 1fr;gap:var(--s-4)}
-}
 @media (max-width:760px){
   :root{--s-5:16px;--s-6:16px}
   .card{padding:var(--s-4);border-radius:var(--r-md)}
-  .verdict{grid-template-columns:1fr;gap:var(--s-4)}
-  .gauge{padding:var(--s-4)}
-  .gauge .num{font-size:clamp(2.5rem,14vw,3.25rem)}
-  .conclusion{font-size:var(--t-lg);padding:var(--s-3) var(--s-4)}
-  .hdr{padding-block:var(--s-3)}
+  /* 窄屏把两把尺子并成一条：240px 的 minmax 在 320px 视口会强行并排后溢出 */
+  /* 窄屏尺子面板收紧一点，把高度让给答案 */
+  .meters{gap:var(--s-2);padding:var(--s-3)}
+  .hero-meta{gap:2px var(--s-2)}
+  /* 空状态在窄屏转成两列：按钮掉到下一行、左对齐，不挤在右边 */
+  .empty{grid-template-columns:auto minmax(0,1fr)}
+  .empty>.btn{grid-column:2;grid-row:auto;justify-self:start;margin-top:var(--s-2)}
+  /* 窄屏顶栏只留品牌名 —— 那句 tagline 是"第一次看才知道"的信息，
+     每天用的人不需要它常驻，让给数据。 */
+  .brand-sub{display:none}
   .hdr-right{width:100%;justify-content:space-between}
   .hdr-meta{text-align:left}
-  .legend .mini{margin-left:0;flex-basis:100%}
+  .legend .mini,.legend .clip{margin-left:0;flex-basis:100%}
 }
 /* 窄屏下把两张数据表改成卡片式，标签在左、数值在右；不隐藏任何字段 */
 @media (max-width:640px){
@@ -789,7 +884,9 @@ details.hform-w[open]>summary::before{content:"－ "}
 }
 @media (max-width:420px){
   table.hold tbody tr,table.cand tbody tr,table.intra tbody tr{grid-template-columns:1fr}
-  .gauge .num{font-size:clamp(2.25rem,16vw,2.75rem)}
+  /* 极窄屏（390px 手机）：答案要独占一行才读得顺，尺子里的数字也降一档 */
+  .answer{font-size:1.5rem}
+  .ruler .r-v b{font-size:1.5rem}
 }
 /* 触摸设备：加大点击目标 */
 @media (pointer:coarse){
@@ -839,10 +936,13 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
 .phead{display:flex;align-items:flex-end;justify-content:space-between;
   gap:var(--s-5);flex-wrap:wrap;margin-bottom:var(--s-5);
   padding-bottom:var(--s-4);border-bottom:1px solid var(--line)}
-.phead h2{margin:0;font-size:clamp(1.25rem,2.2vw,1.5rem);font-weight:700;
-  letter-spacing:-.018em;line-height:1.25}
-.phead .sub{margin:var(--s-1) 0 0;font-size:var(--t-sm);color:var(--ink-3);
-  line-height:1.7;max-width:64ch}
+.phead h2{margin:0;font-size:clamp(1.25rem,2vw,1.375rem);font-weight:700;
+  letter-spacing:-.02em;line-height:1.25}
+/* ★ max-width 从 64ch 收到 56ch 并加 text-wrap:pretty：旧版副题宽 448px 时
+   会把「今天开盘要不要动手、买/哪只」这种词组从中间劈开（实测截图确认）。
+   pretty 让浏览器优先在标点处断行，代价为零。 */
+.phead .sub{margin:var(--s-1) 0 0;font-size:var(--t-md);color:var(--ink-3);
+  line-height:1.7;max-width:56ch;text-wrap:pretty}
 .phead .sub b{color:var(--ink-2);font-weight:600}
 .phead-act{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}
 
@@ -932,10 +1032,8 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
           <rect x="16" y="4" width="3.4" height="14.4" rx="1.1" fill="currentColor"/>
         </svg>
       </span>
-      <div>
-        <h1 class="brand-title">乖离率策略 · 每日参考</h1>
-        <p class="brand-sub">超跌抄底 · 只在值得出手的日子出手</p>
-      </div>
+      <h1 class="brand-title">乖离率策略 · 每日参考</h1>
+      <p class="brand-sub">只在值得出手的日子出手</p>
     </div>
     <div class="hdr-right">
       <!-- ★ 这里只留「真的出问题时才出现」的一句话。
@@ -1032,9 +1130,15 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
       <span class="nav-dot" id="nd-hist" aria-hidden="true"></span>
     </button>
 
-    <p class="nav-hint"><b>有红点，就是有事要你处理。</b>
-      三个时段页各自的角标显示它们最要紧的数字 —— 今天能不能出手、盘中扫到几只、
-      盘后任务跑到哪了，不用逐页翻。</p>
+    <!-- 图例默认收起：它是"第一次看才知道"的东西，不该占用每天都要扫的侧栏。 -->
+    <details class="nav-help">
+      <summary>怎么看这个菜单</summary>
+      <ul>
+        <li class="hot"><span><b>红点</b>：今天可以出手，或持仓触发止损</span></li>
+        <li class="warn"><span><b>琥珀点</b>：持仓到了锁利线，值得看一眼</span></li>
+        <li><span><b>角标</b>：那一页最要紧的数字，不点进去也能判断要不要细看</span></li>
+      </ul>
+    </details>
   </nav>
 
   <main class="panes" id="panes">
@@ -1061,31 +1165,58 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
   <!-- 数据源还没发布当日行情时在这里说清楚，默认隐藏 -->
   <div class="stale" id="dataWarn" role="status" aria-live="polite"></div>
 
-  <!-- 结论：整个页面的第一眼答案 -->
+  <!-- 结论：整个页面的第一眼答案。
+       ★ 结构改版的理由（旧版实测）：
+         ① 一个 208px 宽的仪表盘放着 56px 的「1」，而真正的答案只有 21px ——
+            层级倒挂，用户要先读数字、再找门槛、再自己比较才能得出结论；
+         ② 7 个等权小胶囊换行后第二行右边空 470px，他最关心的
+            「沪深主板达标」排在第五位。
+       现在：短答案（全页最大字号）→ 两把尺子并排，各带「现值 / 门槛 / 进度条」，
+       差距用条的长短表达 → 其余细节压成一行 12px 小字。 -->
   <div class="card">
     <h2>今天要不要动手 <span class="tag" id="tagDate">—</span></h2>
-    <div class="verdict">
-      <div class="gauge" id="breadthBox">
-        <span class="num" id="breadthNum">—</span>
-        <span class="lab">全市场信号股票数</span>
-        <span class="th" id="breadthTh">门槛 ≥ 50</span>
+
+    <!-- 两栏：左边给答案，右边给论据。
+         ★ 为什么并排而不是上下：第一版改完后答案是"今天不动手"（6 个字），
+           独占 1066px 一行，右边空掉 800px —— 留白反而变成了"没做完"。
+           把两把尺子挪到右侧，既填满宽度，也把阅读顺序固定成
+           「先读结论 → 再看它离门槛差多少」。 -->
+    <div class="hero-grid">
+      <div class="hero-answer">
+        <p class="answer" id="actionText" role="status">加载中…</p>
+        <p class="answer-sub" id="actionSub"></p>
       </div>
-      <div class="verdict-body">
-        <div class="conclusion act-no" id="actionText">加载中…</div>
-        <div class="meta">
-          <div class="kv">交易日：<b id="mDate">—</b></div>
-          <div class="kv">更新时间：<b id="mUpd">—</b></div>
-          <div class="kv">全市场股票：<b id="mTotal">—</b> 只</div>
-          <div class="kv">仅乖离率 ≤ -15%（全市场）：<b id="mBias">—</b> 只</div>
-          <div class="kv" id="kvMain">沪深主板达标：<b id="mMain">—</b> 只</div>
-          <!-- ★ 两把尺子必须并排出现：上面的仪表写「全市场门槛 ≥ 50」，
-               这里写「主板门槛 ≥ 30」。只给全市场那个，用户会以为
-               主板数字低就是没机会；并排放才读得懂"哪个数字对哪个门槛"。 -->
-          <div class="kv">沪深主板门槛：<b id="mThMain">—</b></div>
-          <div class="kv">沪深主板仅乖离率：<b id="mBiasMain">—</b> 只</div>
+
+      <!-- 两把尺子：全市场（择时总开关）／沪深主板（他真正能买的池子）。
+           并排是刻意的 —— 只给"门槛 50"这一个数，用户会拿主板的小数字去比 50。
+           ★ 合进同一块面板（而不是两个并排的盒子）：两个盒子各有一套内边距，
+             换行后还各占一行标题，实测要 198px；合成一块后是 160px，
+             而且视觉上"这是一组对照指标"比"两张互不相干的卡片"更准确。 -->
+      <div class="meters">
+        <div class="ruler" id="rMarket">
+          <span class="r-k">全市场信号广度<em>择时总开关</em></span>
+          <span class="r-v"><b id="rMarketV">—</b><s id="rMarketT">门槛 ≥ 50</s>
+            <u id="rMarketG"></u></span>
+          <span class="r-bar"><i id="rMarketB"></i><em aria-hidden="true"></em></span>
+        </div>
+        <div class="ruler mine" id="rMain">
+          <span class="r-k">沪深主板达标<em>你实际能买的</em></span>
+          <span class="r-v"><b id="rMainV">—</b><s id="rMainT">门槛 ≥ 30</s>
+            <u id="rMainG"></u></span>
+          <span class="r-bar"><i id="rMainB"></i><em aria-hidden="true"></em></span>
         </div>
       </div>
     </div>
+
+    <p class="hero-meta">
+      <span>仅乖离率 ≤ -15%：<b id="mBias">—</b> 只（全市场）· <b id="mBiasMain">—</b> 只（沪深主板）</span>
+      <span class="sep">|</span>
+      <span>交易日 <b id="mDate">—</b></span>
+      <span class="sep">|</span>
+      <span>更新于 <b id="mUpd">—</b></span>
+      <span class="sep">|</span>
+      <span>全市场 <b id="mTotal">—</b> 只</span>
+    </p>
   </div>
 
   <div class="card">
@@ -1234,6 +1365,7 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     <div class="legend">
       <span><i class="lg-bar"></i>每日广度</span>
       <span><i class="lg-th"></i>出手门槛（<span id="lgTh">50</span>）</span>
+      <span class="clip" id="lgClip"></span>
       <span class="mini">柱子越高 ＝ 市场越恐慌 ＝ 机会越大</span>
     </div>
   </div>
@@ -1657,10 +1789,13 @@ function renderPostStats(t){
     return;
   }
   const fresh=!t.stale;
+  /* ★ 单位修正：门槛是"阈值"不是"个数"，旧版写「出手门槛 50 只」读起来是错的。
+     ★ 且不再把"数据日期"标红 —— .stat.hot 用的是 --up（涨色），
+       在一个 A 股工具里把日期染红会被读成"涨"。红只留给"达标出手"。 */
   box.innerHTML =
-    statBox('数据日期', t.date||'—', '', fresh) +
+    statBox('数据日期', t.date||'—', '', false) +
     statBox('信号广度', fmt(t.breadth), '只', !!t.triggered) +
-    statBox('出手门槛', t.threshold, '只', false) +
+    statBox('出手门槛', '≥'+t.threshold, '只', false) +
     statBox('沪深主板达标', fmt(t.breadth_main), '只', false) +
     statBox('候选股', (t.candidates||[]).length, '只', false) +
     statBox('数据源', fresh?'已发布':'未发布', '', false);
@@ -1676,6 +1811,37 @@ function renderPostStats(t){
   }
 }
 
+/* 把「现值 / 门槛」写成一条带进度条的尺子。
+   ★ 进度上限锁 100%：广度 199 对门槛 50 时按原值会画出 398% 的条。
+   ★ 数值缺失（老数据没有 breadth_main）时给「—」并把条清零，
+     不能默认成 0 —— 0 和"没这个数"在用户眼里是两件事。
+   ★ 右侧补一句「还差 N 只 / 已达标」：光有条，几乎全空时会被读成
+     "数字下面的一条装饰线"，加了这句话它才是一条尺子。 */
+function renderRuler(key, val, th, unit){
+  const vEl=$(key+'V'), tEl=$(key+'T'), bEl=$(key+'B'), gEl=$(key+'G'), root=$(key);
+  if(!vEl) return;
+  const hot = (val!=null && th!=null && +val >= +th);
+  if(val==null){ vEl.textContent='—'; if(bEl) bEl.style.width='0%'; }
+  else{
+    if(vEl.textContent==='—') vEl.textContent=val; else setNum(vEl, val);
+    /* ★ 下限 8px（用百分比表达不了像素，所以给个最小可见宽度）：
+       "1 / 50" 只有 2% —— 在 420px 的轨道上约 8px，是能看见的一小截；
+       但 "0 / 30" 会是 0%，于是轨道全空。0 就该是全空，这没问题，
+       所以只对"有值但极小"的情况兜底成 1.5%，避免看起来像渲染坏了。 */
+    if(bEl && th){
+      const pct = (+val)/(+th)*100;
+      bEl.style.width = (val>0 && pct<1.5 ? 1.5 : Math.min(100, pct)) + '%';
+    }
+  }
+  if(tEl) tEl.textContent = (th==null) ? '门槛 —' : ('门槛 ≥ '+fmt(th)+(unit||''));
+  if(gEl){
+    if(val==null || th==null) gEl.textContent='';
+    else if(hot) gEl.textContent='已达标 ✓';
+    else gEl.textContent='还差 '+fmt(+th - +val)+(unit||'');
+  }
+  if(root) root.classList.toggle('is-hot', hot);
+}
+
 async function loadToday(){
   const t=await jget("/api/today");
   if(!t.ok){
@@ -1683,10 +1849,16 @@ async function loadToday(){
     //   否则页面会一直停在 loading 状态，用户以为程序没跑起来。
     showBanner(t.msg||"尚无数据，请到「盘后总结」点一次「更新数据」。","err");
     const act=$("actionText");
-    act.textContent="还没有数据 —— 先到「盘后总结」更新一次数据";
-    act.className="conclusion act-no";
-    $("breadthBox").className="gauge";
+    act.textContent="还没有数据";
+    act.className="answer";
+    const sub=$("actionSub");
+    if(sub) sub.textContent="先到「盘后总结」点一次「更新数据（盘后任务）」。";
+    renderRuler('rMarket', null, null, ' 只');
+    renderRuler('rMain', null, null, ' 只');
     $("tagCand").textContent="仅达标时显示";
+    $("tagDate").textContent="—";
+    $("mDate").textContent="—"; $("mUpd").textContent="—"; $("mTotal").textContent="—";
+    $("mBias").textContent="—"; $("mBiasMain").textContent="—";
     setDataWarn(null);
     setNav('pre','—',false);
     setPill('prePill','还没有数据','watch');
@@ -1696,22 +1868,45 @@ async function loadToday(){
   hideBanner();
   $("tagDate").textContent = t.stale ? (t.date+" · 数据源未更新") : t.date;
   setDataWarn(t);
-  const bNum = $("breadthNum");
-  if(bNum.textContent === "—") bNum.textContent = t.breadth; else setNum(bNum, t.breadth);
-  $("breadthTh").textContent = "门槛 ≥ "+t.threshold;
-  const box=$("breadthBox");
-  box.className = "gauge " + (t.triggered?"is-hot":"");
-  const act=$("actionText");
-  act.textContent = t.action;
-  act.className = "conclusion " + (t.triggered?"act-ok":"act-no");
+
+  /* ---- 答案：短句当主角 ----
+     ★ 为什么不用后端返回的整句 t.action 当大标题：它长这样
+       「⛔ 未达标：今天不动手（需广度 ≥ 50）」，22 个字放在 30px 上会占满整行，
+       而且那半个括号里的口径，下面的两把尺子已经用进度条讲得更清楚了。
+       所以大标题由前端拼一句 6~8 字的结论，完整口径降级到副标题（仍是后端原文），
+       原文同时挂在 title 上，信息一点不丢。 */
+  const act=$("actionText"), sub=$("actionSub");
+  const mainV = (t.breadth_main==null? null : +t.breadth_main);
+  const mainT = (t.threshold_main==null? null : +t.threshold_main);
+  act.textContent = t.triggered ? "今天可以出手" : "今天不动手";
+  act.className = "answer " + (t.triggered?"act-ok":"act-no");
+  act.title = t.action || "";
+  if(sub){
+    if(t.stale){
+      sub.innerHTML = '数据源还没发布 <b>'+esc(t.expected_date||'当日')+'</b> 日线 —— '+
+        '下面的数字仍是 <b>'+esc(t.date)+'</b> 收盘的口径，傍晚再更新一次。';
+    }else if(t.triggered){
+      sub.innerHTML = '沪深主板有 <b>'+fmt(mainV)+'</b> 只达标，按下方「今日操作清单」执行；'+
+        '<b>止损纪律优先于一切</b>。';
+    }else{
+      /* ★ 只讲"这一道门槛差多少"，不再把主板口径也塞进来：
+         主板那组数字旁边的尺子已经在讲，塞进这句话会把副题撑成三行，
+         末尾还会掉出一个 4 字的孤行。 */
+      const gap = (t.threshold!=null && t.breadth!=null)
+        ? ('离门槛还差 <b>'+fmt(Math.max(0,+t.threshold - +t.breadth))+'</b> 只')
+        : '未达门槛';
+      sub.innerHTML = '全市场广度 <b>'+fmt(t.breadth)+'</b>，'+gap+'。今天空仓，不用动手。';
+    }
+  }
+
+  /* ---- 两把尺子 ---- */
+  renderRuler('rMarket', t.breadth, t.threshold, ' 只');
+  renderRuler('rMain',   mainV,     mainT,           ' 只');
+
   $("mDate").textContent = t.date;
   $("mUpd").textContent = (t.updated_at||"").replace("T"," ");
   $("mBias").textContent = fmt(t.bias_only);
   $("mTotal").textContent = fmt(t.stocks_total);
-  const mMain=$("mMain");
-  if(mMain) mMain.textContent = (t.breadth_main==null) ? "—" : fmt(t.breadth_main);
-  const mThMain=$("mThMain");
-  if(mThMain) mThMain.textContent = (t.threshold_main==null) ? "—" : ("≥ "+fmt(t.threshold_main)+" 只");
   // ★ 主板口径的「仅乖离率」也要露出来：全市场 20 只 vs 主板 10 只，
   //   只给全市场数字会让用户以为一半都不在主板上——其实他只能看主板那 10 只。
   const mBiasMain=$("mBiasMain");
@@ -1756,16 +1951,12 @@ async function loadToday(){
      ★ 只有达标（＝策略允许出手）时才亮红点。不亮就代表今天真没事 ——
        这个"不亮"本身也是有用信息，比常年恒亮的点诚实得多。 */
   setNav('pre', '广度 '+fmt(t.breadth), !!t.triggered, t.triggered?'hot':'');
-  /* 用户只买沪深主板，主板达标数才是他真正的机会数。
-     有值时高亮出来，别让「全市场」那个大数字把注意力全抢走。 */
-  const kvM=$('kvMain');
-  if(kvM) kvM.className='kv'+((t.breadth_main!=null && +t.breadth_main>0)?' hot':'');
-  /* 页头胶囊：一句话把"今天动不动手"答掉 —— 不给它，用户就得自己
-     把广度、门槛、主板门槛三个数字对照着读一遍才能得出结论。 */
+  /* 页头胶囊改写「数据新鲜度」而不是「今天动不动手」。
+     ★ 原来它写「今天不动手 · 空仓等待」，和下面 30px 的答案完全重复；
+       而"这份数据是哪天的、新不新鲜"却只在正文小字里 ——
+       把重复的那句换成用户真正需要确认的元信息，一行字不浪费。 */
   if(t.stale) setPill('prePill','数据源未发布 '+(t.expected_date||'当日')+' 行情','watch');
-  else setPill('prePill',
-    t.triggered ? ('★ 今天可以出手 · 主板 '+fmt(t.breadth_main)+' 只') : '今天不动手 · 空仓等待',
-    t.triggered ? 'act' : 'wait');
+  else setPill('prePill','数据 '+t.date+' · 已更新', t.triggered ? 'act' : 'wait');
   /* 盘后总结页的数据状态条与同一份数据同源，顺手一起刷 */
   renderPostStats(t);
 }
@@ -1874,12 +2065,13 @@ async function loadIntraday(){
   h+='<div class="iph"><span class="pill '+pcls+'">'+esc(ptxt)+'</span>'+
     '<span class="mini">'+(prog>=0.999 ? "已收盘口径" : "时间进度 "+(prog*100).toFixed(0)+"%")+
     ' · 日线基准 '+(esc(d.base_date||"—"))+' · 扫描 '+fmt(d.scanned)+' 只</span></div>';
+  /* 三张卡 instead of 五张：门槛不再单占一张卡（旧写法「全市场门槛 50 只」
+     把阈值当成了个数，读起来是错的），而是挂在它所约束的那个数字后面 ——
+     「0 只 / 门槛 30」一眼就能判断达标没有，也不用在卡片之间来回对照。 */
   h+='<div class="stats">'+
-     statBox("主板达标", pool, "只", pool>0)+
-     statBox("主板仅乖离率", nearN, "只", false)+
-     statBox("全市场广度", d.breadth_full, "只", gate)+
-     statBox("全市场门槛", d.threshold, "只", false)+
-     statBox("主板门槛", d.threshold_main, "只", false)+
+     statBox("沪深主板达标", pool, "只 / 门槛 "+fmt(d.threshold_main), pool>0)+
+     statBox("沪深主板仅乖离率", nearN, "只", false)+
+     statBox("全市场信号广度", d.breadth_full, "只 / 门槛 "+fmt(d.threshold), gate)+
      '</div>';
 
   /* ★ 页内分段：这一页装着两张清单 + 一段口径说明，全摊开就变成新的长页面。
@@ -2199,15 +2391,31 @@ function drawChart(rows, th){
     ctx.fillStyle=cAxis; ctx.textAlign="center";
     ctx.fillText("暂无历史数据", W/2, H/2); ctx.textAlign="left"; return; }
   const vals=rows.map(r=>r.breadth);
-  const maxV=Math.max(th*1.4, ...vals, 10);
+  const rawMax=vals.length ? Math.max(...vals) : 0;
+  const dataMax=Math.max(th*1.4, rawMax, 10);
+  /* ★ 纵轴上限要收：实测这 250 天里有一根 199 的柱子，按数据最大值定标
+     会把门槛线（50）压到 25% 高度、其余柱子全贴地 —— 而这张图要回答的是
+     "机会多久来一次 / 上一次是什么时候"，不是"最高冲到多少"。
+     所以上限收到 max(门槛×3, 60)：门槛线保证落在 1/3 高度以上，
+     超出的柱子在顶部画一个小三角标示，并在图例里写明有几天超出。
+   ★ 刻度取"整数档"（20/25/50/100…）而不是 maxV/4 —— 旧版算出 38/113 这种刻度，
+     读图的人要在脑子里做一次换算才知道一条网格线代表多少。 */
+  const NICE=[1,2,5,10,20,25,50,100,200,250,500,1000,2000,5000];
+  const cap=Math.max(th*3, 60);
+  let maxV=Math.min(dataMax, cap);
+  let gstep=NICE[NICE.length-1];
+  for(const s of NICE){ const k=maxV/s; if(k>=2.5 && k<=5.2){ gstep=s; break; } }
+  maxV=Math.ceil(maxV/gstep)*gstep;
+  const gticks=Math.max(2, Math.round(maxV/gstep));
+  const clipped=vals.filter(v=>v>maxV).length;
   const n=rows.length;
   const X=i=> pl + (W-pl-pr) * (n<=1?0.5:i/(n-1));
-  const Y=v=> H-pb - (H-pt-pb) * (v/maxV);
+  const Y=v=> H-pb - (H-pt-pb) * (Math.min(v,maxV)/maxV);
 
   // 网格
   ctx.strokeStyle=cGrid; ctx.fillStyle=cAxis; ctx.lineWidth=1;
-  for(let k=0;k<=4;k++){
-    const v=maxV*k/4, y=Y(v);
+  for(let k=0;k<=gticks;k++){
+    const v=maxV*k/gticks, y=Y(v);
     ctx.beginPath();ctx.moveTo(pl,y);ctx.lineTo(W-pr,y);ctx.stroke();
     ctx.textAlign="right"; ctx.fillText(String(Math.round(v)), pl-8, y+4);
   }
@@ -2228,6 +2436,18 @@ function drawChart(rows, th){
     ctx.fillRect(x-bw/2, y, bw, H-pb-y);
   }
   ctx.globalAlpha = 1;
+  /* 超出坐标上限的柱子：在顶部点一个 3px 小三角，
+     否则读者会以为"这就是全部高度"，把 199 那天的分量看轻了。 */
+  if(clipped>0){
+    ctx.fillStyle=cBarHot;
+    for(let i=0;i<n;i++){
+      if(vals[i]<=maxV) continue;
+      const x=X(i);
+      ctx.beginPath();
+      ctx.moveTo(x, pt-1); ctx.lineTo(x-3, pt+4); ctx.lineTo(x+3, pt+4);
+      ctx.closePath(); ctx.fill();
+    }
+  }
   // 折线
   ctx.strokeStyle=cLine; ctx.lineWidth=1.5; ctx.beginPath();
   for(let i=0;i<n;i++){ const x=X(i),y=Y(vals[i]); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
@@ -2242,6 +2462,15 @@ function drawChart(rows, th){
     ctx.fillText(t, Math.min(Math.max(X(i), pl+18), W-pr-18), H-8);
   });
   ctx.textAlign="left";
+
+  /* 坐标被裁过时必须说出来。没有这句，读者会把顶部那根柱子当成历史最高；
+     有了它，既能保持门槛线可读，也不损失"最恐慌那天冲到了多少"。 */
+  const clipEl=$("lgClip");
+  if(clipEl){
+    clipEl.textContent = clipped>0
+      ? ('▲ 有 '+clipped+' 天超出坐标上限（最高 '+rawMax+' 只）')
+      : '';
+  }
 }
 
 /* ============ 持仓表格（持仓卡 / 任务结果 共用） ============ */
@@ -2341,7 +2570,13 @@ async function addHolding(){
 }
 async function delHolding(id){
   if(!confirm("确定删除这条持仓记录？")) return;
-  await jpost("/api/holdings/"+id,null,"DELETE"); loadHoldings();
+  /* ★ 必须看返回值。删不掉的常见原因是「这条记录已经不存在了」——
+     页面开着很久、或记录已在另一个标签页被删掉，接口会回 404 并说明原因。
+     旧写法 `await jpost(...)` 把整个结果丢掉：用户点了删除、界面毫无反应，
+     只能靠自己刷新页面猜发生了什么。 */
+  const r=await jpost("/api/holdings/"+id,null,"DELETE");
+  if(!r.ok) showBanner(r.msg||"删除失败","err"); else hideBanner();
+  loadHoldings();
 }
 /* ============ 任务中心 ============ */
 function esc(s){ return String(s==null?"":s)
@@ -2651,9 +2886,18 @@ function startTaskPoll(){
 }
 
 async function saveSchedule(key){
+  /* ★★ 勾选框要从「这个任务自己的坞」里找。
+     旧写法是 document.querySelectorAll('[data-key="'+key+'"] input[data-day]')，
+     而 .dock 元素上**从来没有 data-key 属性**（它是静态写在页面里的 <details>）——
+     选择器永远返回空集 → days 恒为 "" → 即使把星期勾满，也会被下面那句
+     「请至少勾选一个星期」拦下。**定时执行功能事实上一直无法开启。**
+     选 DOM 时不要依赖"希望存在"的属性：从已知的容器 id 往下找，结构一变就会
+     报错而不是静默取到空集。 */
+  const box=$('dock-'+key);
+  if(!box){ showBanner("找不到该任务的设置区域，请刷新页面后重试。","err"); return; }
   const enabled=$('en-'+key).checked;
   const at=$('tm-'+key).value||'09:10';
-  const days=[...document.querySelectorAll('[data-key="'+key+'"] input[data-day]')]
+  const days=[...box.querySelectorAll('input[data-day]')]
     .filter(x=>x.checked).map(x=>x.dataset.day).join(',');
   if(enabled && !days){ showBanner("开启定时时，请至少勾选一个星期。","err"); return; }
   const r=await jpost('/api/tasks/'+key+'/schedule',{enabled:enabled,at_time:at,days:days});

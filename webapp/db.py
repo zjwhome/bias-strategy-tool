@@ -234,13 +234,34 @@ def list_holdings(status: str = "holding") -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def close_holding(hid: int, sell_date: str, sell_price: float, reason: str = "") -> None:
+def get_holding(hid: int) -> dict | None:
+    """按 id 取一条持仓（不管已平仓与否），找不到返回 None。
+
+    ★ 用途：接口层要能区分「这条记录不存在」和「这条记录已经是平仓状态」——
+      否则对不存在的 id 执行平仓/删除会静默返回成功，
+      界面上看起来操作成功、刷新后记录却还在（或干脆没变化），
+      是最难排查的一类"假成功"。
+    """
     with connect() as conn:
-        conn.execute(
+        r = conn.execute("SELECT * FROM holdings WHERE id=?", (hid,)).fetchone()
+        return dict(r) if r else None
+
+
+def close_holding(hid: int, sell_date: str, sell_price: float,
+                  reason: str = "") -> int:
+    """平仓。返回受影响行数（0 = 没有这条记录，或它已经是平仓状态）。
+
+    ★ WHERE 里带 `status='holding'`：把"存在性/状态校验"和"更新"压进同一条语句，
+      即使两次调用之间记录被改过（控制台进程、另一个标签页），也不会把
+      一条已平仓记录的卖出日期/价格**静默改写**掉。
+    """
+    with connect() as conn:
+        cur = conn.execute(
             """UPDATE holdings SET status='closed', sell_date=?, sell_price=?, sell_reason=?
-               WHERE id=?""",
+               WHERE id=? AND status='holding'""",
             (sell_date, sell_price, reason, hid),
         )
+        return cur.rowcount
 
 
 def update_peak(hid: int, peak: float) -> None:
@@ -262,9 +283,11 @@ def update_levels(hid: int, stop: float, tp1: float, tp2: float) -> None:
             (stop, tp1, tp2, hid))
 
 
-def delete_holding(hid: int) -> None:
+def delete_holding(hid: int) -> int:
+    """删除持仓记录。返回受影响行数（0 = 这条记录本来就不存在）。"""
     with connect() as conn:
-        conn.execute("DELETE FROM holdings WHERE id=?", (hid,))
+        cur = conn.execute("DELETE FROM holdings WHERE id=?", (hid,))
+        return cur.rowcount
 
 
 # ------------------------------------------------------------ 任务（盘前/盘中/盘后）
