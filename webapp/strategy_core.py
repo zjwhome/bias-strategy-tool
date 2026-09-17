@@ -779,15 +779,23 @@ def time_progress(h: int | None = None, m: int | None = None) -> float:
 _BASE_CSV = os.path.join(DATA_DIR, "_intraday_base.csv")
 _BASE_META = os.path.join(DATA_DIR, "_intraday_base.json")
 _BASE_COLS = ["code", "name", "data_date", "n_prior", "sum23", "vol_ma5", "close5", "last_close"]
+# 哨兵日期：当作「今天在很远的未来」→ 尾部每一根 K 线都算「今日之前」。
+# 用途见 intraday_base：让基准只随「数据内容」变化，从而跨天复用。
+_ALL_BARS = "9999-12-31"
 
 
 def save_intraday_base(recs: list[dict], cache_key: str = "") -> None:
     """把盘中基准落盘。
 
-    ★ cache_key = f"{本地数据最新交易日}|{扫描日}" —— 两者**任一**变化都重建：
+    ★ cache_key 见 intraday_base：f"{本地数据最新交易日}|{生效口径}"。
       · 本地数据前进了一天（跑了盘后任务）→ 基准必须跟着前移
-      · 扫描日换了（今天 → 明天）→ 「今日之前」这个集合变了
-    重建一次约 1.5~3 秒，每天最多发生一次，不值得为省这点时间去冒险。
+      · 口径从 "all" 变成具体扫描日（当天盘后已跑）→ 也必须重建
+
+    ⚠️ 重建耗时**严重依赖系统文件缓存**：热缓存 2.9 秒，冷启动（每天第一次）
+       **160.2 秒** —— 5006 个文件逐个 open/seek，实测 2026-09-17。
+       「一天才一次、3 秒而已」是错的，这曾经让用户每天白等 2 分半。
+       所以现在由盘后任务在数据落地时顺手重建（那时文件刚写过），
+       盘中扫描只读缓存。
     """
     try:
         df = pd.DataFrame(recs, columns=_BASE_COLS)
@@ -869,11 +877,30 @@ def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | Non
                 last_close=round(float(cl[-1]), 4))
 
 
-def intraday_base(data_date: str = "", force: bool = False, log=None) -> dict:
-    """{code: 盘中基准}。优先读缓存（键 = 数据日期|扫描日），过期或缺失才重建。"""
+def intraday_base(data_date: str = "", force: bool = False, log=None,
+                  scan_day: str = "", include_all: bool | None = None) -> dict:
+    """{code: 盘中基准}。优先读缓存，过期或缺失才重建。
+
+    ★★ 缓存键 = f"{数据日期}|{生效口径}"，口径只有两种：
+      · "all" —— 扫描日 > 数据日期。**正常盘中就是这一种**：当天还没收盘，
+                 数据源也还没发布当日 K 线，于是「今日之前」= CSV 尾部全部 K 线，
+                 基准**只取决于 CSV 内容**，因此可以跨天复用。
+      · 扫描日 —— 扫描日 ≤ 数据日期（当天盘后任务已经跑过、当日 K 线已入库）。
+                 此时必须把当日那根排除掉，不能复用 "all" 的结果。
+
+    ★★ 为什么非这么掰不可（2026-09-17 实测）：
+       旧口径把扫描日**无条件**写进缓存键 → 每天第一次盘中扫描必然全量重建，
+       冷启动逐只打开 5006 个 CSV 要 **160.2 秒**（日志原话：
+       「基准建立完成：5006 只，耗时 160.2 秒」），而热缓存只要 2.9 秒。
+       这 160 秒正是用户 14:30 点完「立即执行」后干等的时间。
+       改成 "all" 之后基准随「数据落地」而变（由盘后任务顺手重建，见 updater），
+       盘中扫描直接命中缓存。
+    """
     log = log or (lambda s: None)
-    today = datetime.now().strftime("%Y-%m-%d")
-    key = f"{data_date or ''}|{today}"
+    day = scan_day or datetime.now().strftime("%Y-%m-%d")
+    if include_all is None:            # None = 按扫描日自动判断；True/False = 强制
+        include_all = day > (data_date or "")
+    key = f"{data_date or ''}|{'all' if include_all else day}"
     if not force and os.path.exists(_BASE_CSV) and os.path.exists(_BASE_META):
         try:
             with open(_BASE_META, encoding="utf-8") as f:
@@ -891,17 +918,41 @@ def intraday_base(data_date: str = "", force: bool = False, log=None) -> dict:
     out = {}
     files = [f for f in glob.glob(os.path.join(DATA_DIR, "*.csv"))
              if not os.path.basename(f).startswith("_")]
+    # ★ 用哨兵当作「今天」→ 尾部所有 K 线都算「今日之前」。
+    #   已验证与「扫描日 > 数据日期」时的现口径逐字段完全等价（600 只抽样零差异）。
+    eff_today = _ALL_BARS if include_all else day
     for f in files:
         code = os.path.basename(f)[:-4]
         if not code.isdigit():
             continue
-        m = _metrics_from_tail(f, today)
+        m = _metrics_from_tail(f, eff_today)
         if m:
             out[code] = dict(code=code, name="", **m)
     if out:
         save_intraday_base(list(out.values()), key)
     log(f"[盘中] 基准建立完成：{len(out)} 只，耗时 {time.time()-t0:.1f} 秒")
     return out
+
+
+def prebuild_intraday_base(data_date: str, log=None) -> int:
+    """盘后数据落地后，顺手把「all」口径的盘中基准重建好。返回只数（失败 -1）。
+
+    ★★ 为什么必须挪到这里来做（2026-09-17 实测）：盘中基准要逐只打开 5006 个
+       CSV 读尾部，**冷启动 160.2 秒**、热缓存 2.9 秒。放在盘中任务里重建，
+       就是用户 14:30 点完「立即执行」后干等两分半；放在这里，这些文件刚被
+       更新器写过（还在系统文件缓存里，快得多），而且这段时间用户本来就在等
+       盘后任务（20~25 分钟），多几秒无感。预建好后次日盘中扫描直接命中缓存。
+    """
+    log = log or (lambda s: None)
+    try:
+        b = intraday_base(data_date=data_date, force=True, log=log, include_all=True)
+        log(f"[盘后] 盘中基准已预建 {len(b)} 只 —— 下次盘中扫描可直接命中缓存")
+        return len(b)
+    except Exception as e:
+        # ★ 预建失败绝不能影响盘后任务本体：次日盘中扫描发现缓存键不匹配会自己重建，
+        #   只是慢一点（160 秒），不会算错。
+        log(f"[盘后] 盘中基准预建失败（不影响本次更新）：{type(e).__name__}: {e}")
+        return -1
 
 
 def fetch_live_quotes_bulk(codes: list[str], chunk: int = 300, workers: int = 6,
@@ -999,7 +1050,7 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
     """
     log = log or (lambda s: None)
     today = datetime.now().strftime("%Y-%m-%d")
-    base = intraday_base(data_date=data_date, log=log)
+    base = intraday_base(data_date=data_date, log=log, scan_day=today)
     if not base:
         return dict(ok=False, msg="本地还没有可用的日线数据，请先跑一次「盘后任务」。")
 
@@ -1123,6 +1174,13 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
     if cmp_n:
         log(f"[盘中] 量比自检：{cmp_n} 只可比对，偏离>25% 的 {cmp_bad} 只"
             f"（{'正常' if cmp_bad < cmp_n * 0.05 else '⚠ 异常，请检查单位口径'}）")
+    else:
+        # ★ 说清楚「没比」而不是让下游把 vol_bad=0 读成「比过了、没问题」。
+        #   早盘（进度<50%，约 12:30 前）量的外推系数很大，与腾讯口径可比性差，
+        #   刻意不比对；但这个"跳过"必须在日志和返回体里显式留痕，
+        #   否则一个 0 会被当成绿灯 —— 自检在最需要它的时段反而静默失效。
+        log(f"[盘中] 量比自检：本次跳过（时间进度 {prog*100:.1f}% < 50%，"
+            f"早盘量能外推噪声大，不参与比对）")
 
     return dict(
         ok=True, scan_at=datetime.now().isoformat(timespec="seconds"),
@@ -1130,6 +1188,9 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         base_date=base_date, progress=prog, early=early,
         scanned=n_scanned, quotes=len(rt),
         vol_cmp=cmp_n, vol_bad=cmp_bad,
+        # ★ 下游判断「自检是否真的跑过」要用这个，不要用 vol_bad==0：
+        #   cmp_n=0 时 vol_bad 必然也是 0，那不是通过，是没测。
+        vol_checked=bool(cmp_n),
         main_board_only=mb_only,
         breadth=len(hits),                     # ★ 主板口径（用户实际能买的池子）
         bias_only_total=len(near),

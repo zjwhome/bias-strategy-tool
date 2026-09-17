@@ -63,38 +63,68 @@ UPDATE_STATE = {"running": False, "last": None, "msg": "尚未更新"}
 #   的交易日」，前端就能明确告诉用户：「不是你没跑，是数据源还没出数」。
 #
 #   设计原则：拿不到就返回 None（宁可不提示，也绝不误报）。
-_EXPECT = {"at": 0.0, "date": None, "fetching": False}
-_EXPECT_TTL = 600                     # 10 分钟缓存，避免每次轮询都出网
+#   _EXPECT["next"] 是「下次允许出网的时间」，不是「上次出网的时间」——
+#   成功时按 TTL 缓存 10 分钟；失败时只退避 30 秒。
+#   ★ 这两档必须分开：服务刚起来的那一次探测必然拿不到值（异步预热），如果失败也
+#     要等满 10 分钟，只要首次恰好赶上网络抖动，stale 自检就会瞎掉整整十分钟——
+#     而它恰恰是「傍晚数据没出」时唯一的提醒。
+_EXPECT = {"next": 0.0, "date": None, "fetching": False}
+_EXPECT_TTL = 600                     # 成功：10 分钟缓存，避免每次轮询都出网
+_EXPECT_TTL_FAIL = 30                 # 失败：30 秒后再试
+# 取 3 根：因为盘中要把「今天那根还没走完的 K 线」剔掉，只用最后一根会没有回退值
 _EXPECT_URL = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-               "?param=sh000001,day,,,2,qfq")
+               "?param=sh000001,day,,,3,qfq")
+# 收盘后多久才算「今天的日线已走完」。留 5 分钟给交易所与数据源落库。
+_CLOSE_MIN = 15 * 60 + 5
 
 
 def _fetch_expected_date():
-    """查腾讯上证指数日线的最后一根 —— 即数据源当前最新可得的交易日。"""
+    """查腾讯上证指数日线的最后一根 —— 即数据源当前最新**可得**的交易日。
+
+    ★★ 必须在交易时段剔掉「今天」那一根。
+       腾讯这个接口在盘中就会带上今天那根还没走完的 K 线，于是「最新可得交易日」
+       会等于今天，而我们的库上一次更新还停在昨天 —— /api/status 就会报
+       stale=True，页面从 09:30 到 15:00 一直挂着「⏳ 数据源还没发布当日行情」。
+       这是**每个交易日的常态**（当天当然还没收盘），
+       用户很快就会把这条提示当背景噪音忽略掉，
+       等傍晚数据真的没出、最需要它提醒的时候反而看不见了。
+       所以：今天那根在 15:05 之前一律不算「可得」。
+    """
     import requests
     r = requests.get(_EXPECT_URL, timeout=6,
                      headers={"User-Agent": "Mozilla/5.0"})
     node = (r.json().get("data") or {}).get("sh000001") or {}
+    rows = None
     for k in ("qfqday", "day"):
-        rows = node.get(k)
-        if rows:
-            return str(rows[-1][0])[:10]
-    return None
+        if node.get(k):
+            rows = node[k]
+            break
+    if not rows:
+        return None
+    out = [str(x[0])[:10] for x in rows if x and str(x[0])[:10]]
+    if not out:
+        return None
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    if out[-1] == today and (now.hour * 60 + now.minute) < _CLOSE_MIN:
+        out = out[:-1]                     # 今天这根还没走完 → 不算
+    return out[-1] if out else None
 
 
 def expected_trade_date():
     """返回「数据源目前最新可得的交易日」，探测失败或首次未就绪时返回 None。
 
-    ★ 后台线程预热 + 10 分钟缓存：绝不让网络请求卡住 /api/status（它每 8 秒被
-      前端轮询一次）。第一次调用返回 None、8 秒后的下一次轮询就能拿到结果。
+    ★ 后台线程预热：绝不让网络请求卡住 /api/status（它每 8 秒被前端轮询一次）。
+      第一次调用返回 None、8 秒后的下一次轮询就能拿到结果；
+      探测失败也只退避 30 秒就重试，不会因为一次网络抖动瞎掉十分钟。
     """
-    fresh = (time.time() - _EXPECT["at"]) < _EXPECT_TTL
-    if fresh or _EXPECT["fetching"]:
+    if time.time() < _EXPECT["next"] or _EXPECT["fetching"]:
         return _EXPECT["date"]
-    _EXPECT["at"] = time.time()          # 先占位，避免轮询时并发重复出网
+    _EXPECT["next"] = time.time() + 15   # 先占位，避免轮询时并发重复出网
     _EXPECT["fetching"] = True
 
     def _warm():
+        got = None
         try:
             got = _fetch_expected_date()
             if got:
@@ -102,6 +132,7 @@ def expected_trade_date():
         except Exception:
             pass                          # 网络失败：保留上一次的值（可能为 None）
         finally:
+            _EXPECT["next"] = time.time() + (_EXPECT_TTL if got else _EXPECT_TTL_FAIL)
             _EXPECT["fetching"] = False
 
     threading.Thread(target=_warm, daemon=True).start()
@@ -119,7 +150,8 @@ def staleness(last_date):
     hint = (f"数据源（新浪财经）目前只发布到 <b>{last_date}</b>，还没有 "
             f"<b>{exp}</b> 的行情，所以本次更新用的是 {last_date} 的数据。"
             f"<br>新浪的当日日线一般要等到<b>当天傍晚</b>才出 —— 稍晚一点"
-            f"再跑一次「盘后任务」，数据就会前进到 {exp}。")
+            f"再跑一次「盘后任务」，数据就会前进到 {exp}。"
+            f"<br>（交易时段不会提示这条：当天还没收盘，本来就不该有当日数据。）")
     return True, exp, hint
 
 

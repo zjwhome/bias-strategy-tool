@@ -456,7 +456,7 @@ def run_intraday(log=None) -> dict:
         headline = f"全市场广度 {scan['breadth_full']} 已达标，但主板暂无全额达标的个股"
         level = "warn"
     elif pool:
-        headline = f"主板有 {pool} 只额度达标，但全市场广度 {scan['breadth_full']} < {th} → 只观察"
+        headline = f"主板有 {pool} 只个股全额达标，但全市场广度 {scan['breadth_full']} < {th} → 只观察"
         level = "warn"
     else:
         headline = (f"今日暂无达标个股（主板 0 只；仅乖离率到位 {near_n} 只，可观察）"

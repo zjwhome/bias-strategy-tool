@@ -111,6 +111,14 @@ def run_update(limit: int = 0, date: str = "", no_fetch: bool = False,
     db.save_daily(snap)
     db.save_candidates(snap["date"], rows)
 
+    # ★ 顺手预建「盘中基准」（逐只读尾部，冷启动要 160 秒）。
+    #   放在这里是因为：① 这些 CSV 刚被本进程写过、还在系统文件缓存里，快得多；
+    #   ② 用户此刻本来就在等盘后任务，而次日 14:30 的盘中扫描将直接命中缓存。
+    #   不预建也不会算错，只是次日盘中那次要现场重建、用户要多等两分半。
+    #   no_fetch / 回看模式没有新数据落地，跳过（避免无谓的 160 秒）。
+    if not no_fetch:
+        core.prebuild_intraday_base(snap["date"], log=log)
+
     # ---------- 广度历史（近 250 日，供前端画曲线） ----------
     # 历史行始终覆盖写入；当日跳过（当日快照信息更完整）
     if write_history:
