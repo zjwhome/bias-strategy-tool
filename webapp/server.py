@@ -224,7 +224,7 @@ def api_today():
     core.reload_config()
     d = db.get_daily()
     if not d:
-        return jsonify(dict(ok=False, msg="尚无数据，请先到「任务中心」跑一次「盘后任务」。"))
+        return jsonify(dict(ok=False, msg="尚无数据，请先到「盘后总结」点一次「更新数据」跑一次盘后任务。"))
     # ★ 读取时按主板过滤：库里 2026-09-16 之前写入的候选股是「只看主板」规则
     #   生效前产生的，混着创业板（宁德时代/光韵达/阳光电源）。不回填历史数据，
     #   而是在读取层拦掉，用户看到的就始终是「只看沪深主板」的名单。
@@ -269,7 +269,7 @@ def api_intraday():
     """最近一次「盘中任务」的扫描结果（供页面「盘中参考」卡片使用）。"""
     got = db.get_scan("intraday")
     if not got:
-        return jsonify(dict(ok=False, msg="还没有盘中扫描结果。到「任务中心」跑一次「盘中任务」即可。"))
+        return jsonify(dict(ok=False, msg="还没有盘中扫描结果。到「盘中参考」点一次「⟳ 实时更新」即可。"))
     # ★ 不能写 dict(ok=..., **p)：p 里本来就有 ok 键，会抛
     #   "got multiple values for keyword argument 'ok'" → 接口 500。
     out = dict(got["payload"])

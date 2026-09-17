@@ -1,19 +1,35 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light" data-theme-pref="auto">
+<html lang="zh-CN" data-palette="paper" data-mode="light" data-theme-pref="auto">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>乖离率策略 · 每日参考</title>
-<!-- 主题必须在首屏渲染之前定好，否则会先白闪一下再变深色 -->
+<!-- 主题必须在首屏渲染之前定好，否则会先按默认配色画一帧、再跳成用户选的那套。
+     存的是一套「配色名」（paper/azure/ink/carbon），不是 light/dark ——
+     「跟随系统」在解析时才会落到 paper（系统亮色）或 ink（系统深色）。 -->
 <script>
 (function(){
-  var pref = 'auto';
-  try { pref = localStorage.getItem('bia_theme') || 'auto'; } catch(e){}
+  var PAL = {paper:'light', azure:'light', ink:'dark', carbon:'dark'};
+  var pref = '';
+  /* ① 地址栏参数优先：?theme=ink 可以直达某套配色，方便把常用的那套存成书签。
+        （旧写法 ?theme=light / ?theme=dark 一并认，落到同色系的第一套。） */
+  try{
+    var q = (new URLSearchParams(location.search).get('theme') || '').toLowerCase();
+    if(q === 'light') q = 'paper';
+    else if(q === 'dark') q = 'ink';
+    if(q && (q === 'auto' || PAL[q])) pref = q;
+  }catch(e){}
+  /* ② 其次是上次选的那套 */
+  if(!pref){ try { pref = localStorage.getItem('bia_theme') || 'auto'; } catch(e){ pref = 'auto'; } }
+  if(pref === 'light') pref = 'paper';
+  else if(pref === 'dark') pref = 'ink';
+  if(pref !== 'auto' && !PAL[pref]) pref = 'auto';
   var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  var theme = (pref === 'dark' || (pref === 'auto' && dark)) ? 'dark' : 'light';
+  var pal = (pref === 'auto') ? (dark ? 'ink' : 'paper') : pref;
   var el = document.documentElement;
-  el.setAttribute('data-theme', theme);
+  el.setAttribute('data-palette', pal);
+  el.setAttribute('data-mode', PAL[pal]);
   el.setAttribute('data-theme-pref', pref);
 })();
 </script>
@@ -58,82 +74,184 @@
   --wrap:1400px;
 }
 
-/* ---------------------------------------------------------------- 浅色主题 */
+/* ==========================================================================
+   1b · 配色方案（四套，可切换）
+   --------------------------------------------------------------------------
+   ★ 为什么从「两套」改成「四套」：原来只有 light / dark 两种，且两套的
+     中性色都固定用同一个蓝相（258），于是浅色偏冷发灰、深色发闷发脏，
+     切换深浅只是把同一张灰纸反过来，谈不上"配色"。
+
+   ★ 每套配色的三件事必须一起定，缺一件就会"看着不对"：
+     ① 中性色相 —— 决定整页的气质。纸白走暖米（84），雾蓝走冷青（245），
+        深夜走蓝黑（265），碳黑走纯中性（chroma 0，OLED 上不发蓝）。
+     ② 层次跨度 —— 这是原来最致命的问题：浅色 bg 97.4 / surface 99.6（差 2.2），
+        深色 bg 17.5 / surface 21.5（差 4），卡片和背景几乎同色，
+        全靠 1px 边框撑着，所以「糊成一片」。现在浅色拉到 4~5、深色拉到 5~6，
+        卡片真的浮起来 / 沉下去。
+     ③ 强调色角色 —— 品牌色只管「可交互」（导航选中、主按钮），
+        涨跌只用红绿，警示只用琥珀。三者不互相串岗，色彩才有重点。
+
+   ★ 深色不用阴影表达层次（阴影在深底上等于没有），改用：
+     · 更亮的嵌套表面（surface-2/3 比卡片更亮）；
+     · 一条 1px 的顶部内高光（--shadow-1 里那条 inset），模拟"边缘被灯照到"。
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- 纸白（浅 · 暖）*/
 :root,
-:root[data-theme="light"]{
+:root[data-palette="paper"]{
   color-scheme:light;
 
-  --bg:         oklch(97.4% .005 258);
-  --surface:    oklch(99.6% .002 258);
-  --surface-2:  oklch(96.3% .008 258);
-  --surface-3:  oklch(93.4% .011 258);
-  --line:       oklch(90.4% .012 258);
-  --line-2:     oklch(83%   .016 258);
+  --bg:         oklch(95.4% .013 84);    /* 暖米底，比纯白低一档 */
+  --surface:    oklch(100%  0   0);      /* 卡片是纯白 —— 靠"更亮"浮起来 */
+  --surface-2:  oklch(97.3% .014 84);    /* 卡片内的凹陷区（表头 / 统计块）*/
+  --surface-3:  oklch(94%   .017 84);
+  --line:       oklch(89.4% .017 84);
+  --line-2:     oklch(79.5% .021 84);
 
-  --ink:        oklch(23%  .030 258);
-  --ink-2:      oklch(45%  .024 258);
-  --ink-3:      oklch(55%  .020 258);
+  --ink:        oklch(24%  .020 62);     /* 暖墨，不是纯黑 —— 长文不刺眼 */
+  --ink-2:      oklch(41.5% .016 62);    /* 正文 */
+  /* ⚠️ 辅助文字必须 ≤52%：55.5% 在 --bg / --surface-2 上只有 4.08~4.44，达不到
+     WCAG 4.5:1（实测 10 处不达标）。52% 在三种浅底上都有 4.63~5.53。 */
+  --ink-3:      oklch(52%  .015 62);
 
-  --brand:      oklch(55%  .185 258);
-  --brand-ink:  oklch(46%  .190 258);
-  --brand-soft: oklch(95.6% .032 258);
-  --brand-ring: oklch(55%  .185 258 / .38);
+  --brand:      oklch(51%  .168 264);    /* 靛蓝：在暖底上是最稳的对比 */
+  --brand-ink:  oklch(42%  .172 264);
+  --brand-soft: oklch(94.4% .030 264);
+  --brand-ring: oklch(51%  .168 264 / .40);
   --on-brand:   oklch(100% 0 0);
 
-  --up:         oklch(54%  .205 25);     /* 涨 = 红（国内惯例） */
-  --up-soft:    oklch(95.6% .035 25);
-  --up-ring:    oklch(54%  .205 25 / .28);
-  --down:       oklch(52%  .132 158);    /* 跌 = 绿 */
-  --down-soft:  oklch(95.2% .034 158);
-  --warn:       oklch(58%  .140 68);
-  --warn-soft:  oklch(96.2% .048 78);
+  --up:         oklch(51.5% .205 26);    /* 涨 = 红（国内惯例）*/
+  --up-soft:    oklch(94.8% .038 26);
+  --up-ring:    oklch(51.5% .205 26 / .30);
+  --down:       oklch(47%  .125 158);    /* 跌 = 绿 */
+  --down-soft:  oklch(94.8% .034 158);
+  --warn:       oklch(54%  .135 68);
+  --warn-soft:  oklch(95.4% .048 78);
 
   /* 「该出手」结论块的唯一高饱和用色 */
-  --alert-bg:   oklch(54%  .205 25);
+  --alert-bg:   oklch(51.5% .205 26);
   --alert-ink:  oklch(100% 0 0);
 
-  --grid:       oklch(92.5% .010 258);
-  --shadow-1:0 1px 2px oklch(23% .03 258 / .05), 0 3px 12px oklch(23% .03 258 / .05);
-  --shadow-2:0 2px 4px oklch(23% .03 258 / .06), 0 12px 30px oklch(23% .03 258 / .07);
+  --grid:       oklch(91%   .013 84);
+  --shadow-1:0 1px 2px oklch(30% .03 62 / .05), 0 3px 10px oklch(30% .03 62 / .05);
+  --shadow-2:0 2px 4px oklch(30% .03 62 / .06), 0 18px 44px oklch(30% .03 62 / .12);
 }
 
-/* ---------------------------------------------------------------- 深色主题 */
-/* 深色不是把浅色反过来：层次靠「更亮的表面」而不是阴影，强调色略降饱和，字重略降。 */
-:root[data-theme="dark"]{
+/* ---------------------------------------------------------------- 雾蓝（浅 · 冷）*/
+/* 比纸白更"冷静"的一套：底色带一点青，卡片保持纯白，适合白天长时间盯盘。 */
+:root[data-palette="azure"]{
+  color-scheme:light;
+
+  --bg:         oklch(96%   .011 238);
+  --surface:    oklch(100%  0   0);
+  --surface-2:  oklch(97.4% .013 238);
+  --surface-3:  oklch(94%   .017 238);
+  --line:       oklch(89.3% .015 238);
+  --line-2:     oklch(79%   .020 238);
+
+  --ink:        oklch(23%  .028 250);
+  --ink-2:      oklch(41.5% .022 250);   /* 正文 */
+  /* 同 paper：辅助文字压到 52% 才在 --bg / --surface-2 上过 4.5:1 */
+  --ink-3:      oklch(52%  .020 250);
+
+  /* ⚠️ 55% 时白字对比刚好 4.50（等于没余量）→ 压到 53% 得 4.88 */
+  --brand:      oklch(53%  .152 232);    /* 天青蓝：与冷底同族但明显更深 */
+  --brand-ink:  oklch(44%  .158 232);
+  --brand-soft: oklch(94%  .030 232);
+  --brand-ring: oklch(53%  .152 232 / .40);
+  --on-brand:   oklch(100% 0 0);
+
+  --up:         oklch(51%  .205 26);
+  --up-soft:    oklch(94.6% .038 26);
+  --up-ring:    oklch(51%  .205 26 / .30);
+  --down:       oklch(47%  .125 160);
+  --down-soft:  oklch(94.6% .034 160);
+  --warn:       oklch(54%  .135 68);
+  --warn-soft:  oklch(95.4% .048 78);
+
+  --alert-bg:   oklch(51%  .205 26);
+  --alert-ink:  oklch(100% 0 0);
+
+  --grid:       oklch(91%   .012 238);
+  --shadow-1:0 1px 2px oklch(25% .04 250 / .05), 0 3px 10px oklch(25% .04 250 / .05);
+  --shadow-2:0 2px 4px oklch(25% .04 250 / .06), 0 18px 44px oklch(25% .04 250 / .13);
+}
+
+/* ---------------------------------------------------------------- 深夜（深 · 蓝黑）*/
+/* 深色不是把浅色反过来：层次靠「更亮的表面」而不是阴影，强调色略降饱和更护眼。 */
+:root[data-palette="ink"]{
   color-scheme:dark;
 
-  --bg:         oklch(17.5% .014 258);
-  --surface:    oklch(21.5% .016 258);
-  --surface-2:  oklch(25.2% .017 258);
-  --surface-3:  oklch(28.8% .018 258);
-  --line:       oklch(30.5% .018 258);
-  --line-2:     oklch(39%   .020 258);
+  --bg:         oklch(14.4% .014 265);   /* 比旧版再深 3 个点，让卡片有地方"浮" */
+  --surface:    oklch(19.8% .016 265);
+  --surface-2:  oklch(24%   .018 265);
+  --surface-3:  oklch(28%   .020 265);
+  --line:       oklch(29%   .019 265);
+  --line-2:     oklch(38.5% .022 265);
 
-  --ink:        oklch(94%  .010 258);
-  --ink-2:      oklch(79%  .014 258);
-  --ink-3:      oklch(65%  .014 258);
+  --ink:        oklch(95.5% .008 265);   /* 不再用 94：深底上差这几个点是"不清爽"的来源 */
+  --ink-2:      oklch(79.5% .013 265);
+  --ink-3:      oklch(64%   .015 265);
 
-  --brand:      oklch(68%  .160 258);
-  --brand-ink:  oklch(80%  .130 258);
-  --brand-soft: oklch(28%  .046 258);
-  --brand-ring: oklch(68%  .160 258 / .45);
-  --on-brand:   oklch(20%  .030 258);
+  --brand:      oklch(70%  .140 248);
+  --brand-ink:  oklch(84%  .105 248);
+  --brand-soft: oklch(27.5% .046 248);
+  --brand-ring: oklch(70%  .140 248 / .48);
+  --on-brand:   oklch(16%  .022 248);    /* 亮蓝底上用深字，对比比白字更好看也更清楚 */
 
-  --up:         oklch(67%  .185 25);
-  --up-soft:    oklch(28%  .055 25);
-  --up-ring:    oklch(67%  .185 25 / .35);
-  --down:       oklch(67%  .130 158);
-  --down-soft:  oklch(27%  .045 158);
-  --warn:       oklch(74%  .130 72);
-  --warn-soft:  oklch(29%  .050 72);
+  --up:         oklch(64%  .175 26);     /* 旧版 67% 在深底上面积一大就刺眼，压到 64 */
+  --up-soft:    oklch(27%  .058 26);
+  --up-ring:    oklch(64%  .175 26 / .38);
+  --down:       oklch(66%  .120 160);
+  --down-soft:  oklch(27%  .046 160);
+  --warn:       oklch(78%  .120 76);
+  --warn-soft:  oklch(29%  .046 76);
 
-  /* 深色下用更深的红，保证白字对比度足够（浅色用 L54 红，深色用 L46 红） */
-  --alert-bg:   oklch(46%  .175 25);
-  --alert-ink:  oklch(97%  .012 25);
+  /* 深色下用更深的红，保证近白字对比度足够 */
+  --alert-bg:   oklch(48%  .165 26);
+  --alert-ink:  oklch(98%  .010 26);
 
-  --grid:       oklch(27%  .016 258);
-  --shadow-1:none;
-  --shadow-2:0 1px 0 oklch(100% 0 0 / .04);
+  --grid:       oklch(26.5% .017 265);
+  --shadow-1:inset 0 1px 0 oklch(100% 0 0 / .045), 0 1px 2px oklch(0% 0 0 / .35);
+  --shadow-2:inset 0 1px 0 oklch(100% 0 0 / .06), 0 12px 34px oklch(0% 0 0 / .50);
+}
+
+/* ---------------------------------------------------------------- 碳黑（深 · 中性）*/
+/* 纯中性（chroma=0）：OLED 屏上不会发蓝，配一点青做强调色，是最"克制"的一套。 */
+:root[data-palette="carbon"]{
+  color-scheme:dark;
+
+  --bg:         oklch(13.6% 0 0);
+  --surface:    oklch(18.8% 0 0);
+  --surface-2:  oklch(23%   0 0);
+  --surface-3:  oklch(27%   0 0);
+  --line:       oklch(28%   0 0);
+  --line-2:     oklch(37.5% 0 0);
+
+  --ink:        oklch(96.5% 0 0);
+  --ink-2:      oklch(80%   0 0);
+  --ink-3:      oklch(64.5% 0 0);
+
+  --brand:      oklch(75%  .112 196);
+  --brand-ink:  oklch(87%  .085 196);
+  --brand-soft: oklch(27%  .034 196);
+  --brand-ring: oklch(75%  .112 196 / .46);
+  --on-brand:   oklch(15%  0   0);
+
+  --up:         oklch(63%  .180 28);
+  --up-soft:    oklch(26.5% .058 28);
+  --up-ring:    oklch(63%  .180 28 / .38);
+  --down:       oklch(67%  .122 162);
+  --down-soft:  oklch(26.5% .046 162);
+  --warn:       oklch(79%  .122 78);
+  --warn-soft:  oklch(28.5% .046 78);
+
+  --alert-bg:   oklch(48%  .168 28);
+  --alert-ink:  oklch(98%   0   0);
+
+  --grid:       oklch(25.5% 0 0);
+  --shadow-1:inset 0 1px 0 oklch(100% 0 0 / .04), 0 1px 2px oklch(0% 0 0 / .4);
+  --shadow-2:inset 0 1px 0 oklch(100% 0 0 / .055), 0 12px 34px oklch(0% 0 0 / .55);
 }
 
 /* ==========================================================================
@@ -155,7 +273,7 @@ body{
 :focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:3px}
 
 /* 主题切换的过渡：只作用于颜色，且不覆盖各组件自己的 transform/box-shadow 过渡 */
-body,header,.card,.kv,.banner,.task,.gauge,.conclusion,.seg,.empty-mark,input[type=time]{
+body,header,.card,.kv,.banner,.gauge,.conclusion,.empty-mark,input[type=time]{
   transition:background-color var(--dur-2) var(--ease),
              border-color var(--dur-2) var(--ease),
              color var(--dur-2) var(--ease);
@@ -180,17 +298,6 @@ header{position:sticky;top:0;z-index:20;background:var(--surface);
 .hdr-right{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap}
 .hdr-meta{font-size:var(--t-sm);color:var(--ink-3);text-align:right;line-height:1.5}
 .hdr-meta b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
-
-/* 主题切换：三档显式选择，不做「点一下猜一圈」的隐晦交互 */
-.seg{display:inline-flex;gap:2px;padding:3px;border-radius:var(--r-md);
-  background:var(--surface-2);border:1px solid var(--line)}
-.seg-btn{font:inherit;font-size:var(--t-xs);font-weight:600;line-height:1;
-  border:0;border-radius:calc(var(--r-md) - 3px);padding:7px 11px;cursor:pointer;
-  background:transparent;color:var(--ink-3);min-height:32px;
-  transition:background-color var(--dur-1) var(--ease),color var(--dur-1) var(--ease)}
-.seg-btn[aria-checked="true"]{background:var(--surface);color:var(--ink);
-  box-shadow:0 1px 2px oklch(0% 0 0 / .07)}
-@media (hover:hover){.seg-btn:hover{color:var(--ink)}}
 
 /* ==========================================================================
    4 · 按钮
@@ -400,23 +507,14 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .legend .mini{margin-left:auto}
 
 /* ==========================================================================
-   12 · 任务中心
+   12 · 任务坞内部（进度条 / 上次执行 / 历史记录）
+   --------------------------------------------------------------------------
+   任务卡本体已经不在这套样式里了：三个任务的结果明细直接进各自分页的正文
+   （见 §17 的 .dock），这里只剩坞里那几个小零件。
    ========================================================================== */
-.task{border:1px solid var(--line);border-radius:var(--r-md);
-  padding:var(--s-4);margin-bottom:var(--s-3);background:var(--surface)}
-@media (hover:hover){.task:hover{border-color:var(--line-2);box-shadow:var(--shadow-1)}}
-.task.running{border-color:var(--brand-ring);background:var(--brand-soft)}
-.task-head{display:flex;justify-content:space-between;align-items:flex-start;
-  gap:var(--s-3);flex-wrap:wrap}
-.task-title{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;
-  font-size:var(--t-md);font-weight:700;color:var(--ink)}
-.task-title .ico{font-size:var(--t-base);line-height:1}
-.task-desc{margin-top:var(--s-2);font-size:var(--t-sm);color:var(--ink-2);line-height:1.7}
-.task-more{display:none;margin-top:var(--s-2);padding-left:var(--s-3);
-  border-left:2px solid var(--line);font-size:var(--t-sm);color:var(--ink-3);line-height:1.75}
-.task-more.show{display:block}
 .task-row{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;
   margin-top:var(--s-3);padding-top:var(--s-3);border-top:1px dashed var(--line)}
+.task-row:first-child{margin-top:0;padding-top:0;border-top:0}
 .task-row input[type=time]{font:inherit;font-size:var(--t-sm);color:var(--ink);
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);
   padding:7px 8px;min-height:34px}
@@ -576,15 +674,12 @@ footer b{color:var(--ink-2)}
 .subtab[aria-selected="true"] .cnt{background:var(--brand-soft);color:var(--brand-ink)}
 .subpane[hidden]{display:none}
 
-/* ---- 任务中心：标签上的状态胶囊 ----
+/* ---- 任务坞头上的状态胶囊 ----
    「未开启」保持灰的（默认态，不需要抢注意力），
    「每天 HH:MM」用品牌色（这是个已生效的设置），
-   「执行中 xx%」用实心品牌色 + 呼吸（唯一需要立刻被看见的状态）。 */
-.tasktabs{margin-bottom:var(--s-4)}
-/* 选择器带上 .subtab：不带的话会被「选中标签的胶囊」那条规则
-   （.subtab[aria-selected="true"] .cnt）按特异性压过去 ——
-   于是当前这一页的「执行中」反而变成了普通胶囊底色。 */
-.subtab .cnt.run{background:var(--brand);color:var(--on-brand);
+   「执行中 xx%」用实心品牌色 + 呼吸（唯一需要立刻被看见的状态）。
+   ★ 不用 .subtab 前缀：这个胶囊现在挂在坞的 <summary> 上，不在子标签里。 */
+.cnt.run{background:var(--brand);color:var(--on-brand);
   animation:breathe 1.8s var(--ease) infinite}
 @keyframes breathe{0%,100%{opacity:1}50%{opacity:.55}}
 
@@ -700,12 +795,123 @@ details.hform-w[open]>summary::before{content:"－ "}
 @media (pointer:coarse){
   .btn{min-height:44px;padding:12px 18px}
   .btn-sm{min-height:40px}
-  .seg-btn{min-height:38px;padding:9px 12px}
   .days label{min-height:38px}
   .sw{min-height:40px}
   .del{padding:9px 12px}
   details.hist summary{padding:9px 0}
 }
+/* ==========================================================================
+   17 · 视觉精修
+   --------------------------------------------------------------------------
+   四套配色只解决「什么颜色」，这一节解决「这些颜色摆在什么形状上」。
+   原则：层次靠表面明度差（已由配色层保证）＋边框＋极淡的斑马纹，
+   而不是靠加阴影和加粗字号 —— 那两样一多就"脏"。
+   ========================================================================== */
+
+/* ---- 滚动条：系统默认在深色主题下是一条刺眼的亮条 ---- */
+*{scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line-2);border:3px solid transparent;
+  background-clip:content-box;border-radius:var(--r-pill)}
+::-webkit-scrollbar-thumb:hover{background:var(--ink-3);background-clip:content-box}
+::-webkit-scrollbar-corner{background:transparent}
+::selection{background:var(--brand-ring);color:var(--ink)}
+
+/* 配色切换的过渡：只给"大块面"加，交互元素各自已经在 §4 §15 里管好了。
+   否则点一下主题，整页所有按钮一起淡入淡出，像卡了一下。 */
+.dock,.stat,.pill,.livebar,.subtabs,.themepop,.empty-mark{
+  transition:background-color var(--dur-2) var(--ease),
+             border-color var(--dur-2) var(--ease),
+             color var(--dur-2) var(--ease)}
+
+/* ---- 表格：斑马纹 ----
+   ★ 顺序要紧：斑马纹在前、hover 在后，两者特异性相同，靠"后者胜出"保证
+     鼠标划过时高亮不被斑马纹吃掉。 */
+tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,transparent)}
+@media (hover:hover){tbody tr:hover{background:var(--surface-2)}}
+.stat{border:1px solid var(--line)}
+
+/* ---- 分页头（每个时段分页统一的开头：标题 / 一句话说明 / 状态 / 主操作）----
+   为什么每个分页都要一个：用户在三个分页之间来回切时，需要一眼确认
+   "我现在看的是哪一段、这些数字是什么时候的、要刷新点哪个按钮"。
+   同一套结构重复三次，比三个长得不一样的分页更好用。 */
+.phead{display:flex;align-items:flex-end;justify-content:space-between;
+  gap:var(--s-5);flex-wrap:wrap;margin-bottom:var(--s-5);
+  padding-bottom:var(--s-4);border-bottom:1px solid var(--line)}
+.phead h2{margin:0;font-size:clamp(1.25rem,2.2vw,1.5rem);font-weight:700;
+  letter-spacing:-.018em;line-height:1.25}
+.phead .sub{margin:var(--s-1) 0 0;font-size:var(--t-sm);color:var(--ink-3);
+  line-height:1.7;max-width:64ch}
+.phead .sub b{color:var(--ink-2);font-weight:600}
+.phead-act{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}
+
+/* 任务结果的第一行：这次执行给出的结论（后端 headline）。
+   明细是论据，这句话才是答案 —— 所以给它一个独立的分量，而不是混在
+   "共 N 只 / 更新时间 …" 这类块标题里被读过去。 */
+.conclusion-mini{margin:0 0 var(--s-4);padding:var(--s-3) var(--s-4);
+  border:1px solid var(--line);border-left:4px solid var(--brand);
+  border-radius:var(--r-md);background:var(--surface-2);
+  font-size:var(--t-md);font-weight:700;line-height:1.65;color:var(--ink);
+  text-wrap:balance}
+
+/* ---- 任务坞：定时设置 / 说明 / 历史记录收进页底 ----
+   原来这三样和结果摊在同一张卡里，一次要滚三屏；现在结果留在正文，
+   调度与记录全部折叠进这里 —— 默认收起，需要时才展开。 */
+.dock{margin-top:var(--s-6);border:1px solid var(--line);border-radius:var(--r-lg);
+  background:var(--surface);box-shadow:var(--shadow-1);overflow:hidden}
+.dock>summary{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap;
+  padding:var(--s-3) var(--s-5);cursor:pointer;list-style:none;min-height:50px;
+  font-size:var(--t-sm);font-weight:700;color:var(--ink-2)}
+.dock>summary::-webkit-details-marker{display:none}
+.dock>summary::before{content:"⚙";font-size:var(--t-base);line-height:1;opacity:.75}
+.dock>summary::after{content:"▾";margin-left:auto;font-size:var(--t-xs);
+  color:var(--ink-3);transition:transform var(--dur-2) var(--ease)}
+.dock[open]>summary::after{transform:rotate(180deg)}
+.dock[open]>summary{border-bottom:1px solid var(--line)}
+@media (hover:hover){.dock>summary:hover{color:var(--ink);background:var(--surface-2)}}
+.dock-body{padding:var(--s-5)}
+.dock-lead{margin:0 0 var(--s-4);font-size:var(--t-sm);line-height:1.8;color:var(--ink-3)}
+.dock-lead b{color:var(--ink-2)}
+
+/* ---- 配色选择弹层 ---- */
+.themewrap{position:relative}
+.themepop{position:absolute;right:0;top:calc(100% + 10px);z-index:60;
+  width:min(324px,86vw);padding:var(--s-2);
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
+  box-shadow:var(--shadow-2);display:none}
+.themepop.show{display:block;animation:pop var(--dur-2) var(--ease-expo) both}
+@keyframes pop{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
+.themepop-t{padding:var(--s-2) var(--s-3) 6px;font-size:var(--t-xs);font-weight:700;
+  letter-spacing:.07em;color:var(--ink-3)}
+.themepop .hint{padding:6px var(--s-3) var(--s-2);font-size:var(--t-xs);
+  line-height:1.7;color:var(--ink-3);border-top:1px solid var(--line);margin-top:6px}
+.theme-opt{display:flex;align-items:center;gap:var(--s-3);width:100%;text-align:left;
+  font:inherit;font-size:var(--t-sm);font-weight:600;color:var(--ink);
+  background:transparent;border:1px solid transparent;border-radius:var(--r-md);
+  padding:var(--s-2) var(--s-3);cursor:pointer;min-height:48px;
+  transition:background-color var(--dur-1) var(--ease),border-color var(--dur-1) var(--ease)}
+@media (hover:hover){.theme-opt:hover{background:var(--surface-2)}}
+.theme-opt[aria-checked="true"]{border-color:var(--brand-ring);
+  background:var(--brand-soft);color:var(--brand-ink)}
+.theme-opt .t-txt{min-width:0}
+.theme-opt .t-name{display:block;font-weight:700}
+.theme-opt .t-note{display:block;margin-top:1px;font-size:var(--t-xs);
+  font-weight:500;line-height:1.5;color:var(--ink-3)}
+.theme-opt[aria-checked="true"] .t-note{color:var(--brand-ink);opacity:.88}
+/* 配色预览：底 / 卡 / 强调 三个色块，直接预览那一套的实际颜色 */
+.swatch{display:flex;flex:0 0 auto;gap:3px;padding:4px;border-radius:9px;
+  border:1px solid var(--line);background:var(--bg)}
+.swatch i{display:block;width:11px;height:20px;border-radius:3px}
+
+/* ---- 导航分组标题（只在宽屏左栏显示） ---- */
+.nav-sep{display:none}
+@media (min-width:1000px){
+  .nav-sep{display:block;margin:var(--s-4) 0 var(--s-1);padding:0 var(--s-3);
+    font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--ink-3)}
+  .nav-sep.first{margin-top:0}
+}
+
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;animation-delay:0s !important;
     animation-iteration-count:1 !important;transition-duration:.01ms !important;
@@ -734,15 +940,27 @@ details.hform-w[open]>summary::before{content:"－ "}
     <div class="hdr-right">
       <!-- ★ 这里只留「真的出问题时才出现」的一句话。
            原来常驻显示「数据日期 X / 更新于 Y」+ 一个「更新数据」按钮：
-           前者在「今日结论」页已经有（交易日 / 更新时间两行），重复；
-           后者和「任务中心 → 盘后任务 → 立即执行」是同一件事，两处入口反而
+           前者在「盘前结论」页已经有（交易日 / 更新时间两行），重复；
+           后者和「盘后总结 → 更新数据」是同一件事，两处入口反而
            让人分不清该点哪个。现在收起来，只保留这一个救命的告警 ——
            数据源没发布当日行情时必须能一眼看见，否则会把昨天的数字当今天用。 -->
       <div class="hdr-meta" id="hRight" role="status" aria-live="polite"></div>
-      <div class="seg" id="themeSeg" role="radiogroup" aria-label="配色主题">
-        <button type="button" class="seg-btn" data-theme-pref="light" role="radio" aria-checked="false">浅色</button>
-        <button type="button" class="seg-btn" data-theme-pref="dark" role="radio" aria-checked="false">深色</button>
-        <button type="button" class="seg-btn" data-theme-pref="auto" role="radio" aria-checked="true">自动</button>
+      <!-- 配色选择：四套配色 + 跟随系统。
+           ★ 从「浅色/深色/自动」三个纯文字按钮改成弹层，是因为现在要展示
+             四套配色，横排按钮在窄屏会挤成一团；而且纯文字看不出颜色长什么样 ——
+             每一项都带三个真色块（底/卡/强调），点之前就知道会变成什么样。 -->
+      <div class="themewrap">
+        <button class="btn btn-sm btn-ghost" id="btnTheme" type="button"
+                aria-haspopup="true" aria-expanded="false" aria-controls="themePop"
+                onclick="toggleThemePop()">
+          <span aria-hidden="true">🎨</span> 配色
+          <span class="mut" id="themeName">纸白</span>
+        </button>
+        <div class="themepop" id="themePop" role="radiogroup" aria-label="配色方案">
+          <div class="themepop-t">配色方案</div>
+          <div id="themeOpts"></div>
+          <p class="hint">选中的配色会记住。选「跟随系统」时，电脑切到深色模式，本页也会跟着变。</p>
+        </div>
       </div>
     </div>
   </div>
@@ -754,16 +972,21 @@ details.hform-w[open]>summary::before{content:"－ "}
 <div class="shell">
 
   <!-- 左栏导航。它同时是一块仪表盘：每项的角标就是那一页最该知道的数字，
-       不点进去也能判断「今天要不要细看」。 -->
+       不点进去也能判断「今天要不要细看」。
+       ★ 分组：上面三项是一条时间线（盘前 → 盘中 → 盘后），下面两项是"我的"。
+         原来那层「任务中心」已经拆掉 —— 任务原本就该长在它所服务的那一页里，
+         单独辟一层，等于让用户为了"刷新今天的数据"多跳一次页。 -->
   <nav class="nav" id="nav" role="tablist" aria-label="页面分区" aria-orientation="vertical">
-    <button class="nav-i" type="button" role="tab" id="tab-today" data-pane="today"
-            aria-selected="true" aria-controls="pane-today">
+    <div class="nav-sep first" aria-hidden="true">今日流程</div>
+
+    <button class="nav-i" type="button" role="tab" id="tab-pre" data-pane="pre"
+            aria-selected="true" aria-controls="pane-pre">
       <svg class="nav-ico" viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true">
         <circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.5"/>
         <circle cx="8" cy="8" r="2.1" fill="currentColor"/></svg>
-      <span class="nav-txt">今日结论</span>
-      <span class="nav-sub" id="nv-today">—</span>
-      <span class="nav-dot" id="nd-today" aria-hidden="true"></span>
+      <span class="nav-txt">盘前结论</span>
+      <span class="nav-sub" id="nv-pre">—</span>
+      <span class="nav-dot" id="nd-pre" aria-hidden="true"></span>
     </button>
 
     <button class="nav-i" type="button" role="tab" id="tab-intra" data-pane="intra"
@@ -776,15 +999,17 @@ details.hform-w[open]>summary::before{content:"－ "}
       <span class="nav-dot" id="nd-intra" aria-hidden="true"></span>
     </button>
 
-    <button class="nav-i" type="button" role="tab" id="tab-task" data-pane="task"
-            aria-selected="false" aria-controls="pane-task" tabindex="-1">
+    <button class="nav-i" type="button" role="tab" id="tab-post" data-pane="post"
+            aria-selected="false" aria-controls="pane-post" tabindex="-1">
       <svg class="nav-ico" viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true">
-        <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4"/>
-        <path d="M6.6 5.6 10.8 8l-4.2 2.4z" fill="currentColor"/></svg>
-      <span class="nav-txt">任务中心</span>
-      <span class="nav-sub" id="nv-task">—</span>
-      <span class="nav-dot" id="nd-task" aria-hidden="true"></span>
+        <path d="M13.4 9.8A5.8 5.8 0 0 1 6.2 2.6 5.8 5.8 0 1 0 13.4 9.8z"
+              stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+      <span class="nav-txt">盘后总结</span>
+      <span class="nav-sub" id="nv-post"></span>
+      <span class="nav-dot" id="nd-post" aria-hidden="true"></span>
     </button>
+
+    <div class="nav-sep" aria-hidden="true">我的</div>
 
     <button class="nav-i" type="button" role="tab" id="tab-hold" data-pane="hold"
             aria-selected="false" aria-controls="pane-hold" tabindex="-1">
@@ -808,20 +1033,37 @@ details.hform-w[open]>summary::before{content:"－ "}
     </button>
 
     <p class="nav-hint"><b>有红点，就是有事要你处理。</b>
-      数字会自动更新 —— 今天能出手、或持仓触发了止损，左边都会先亮红点，
-      不用逐页翻一遍。</p>
+      三个时段页各自的角标显示它们最要紧的数字 —— 今天能不能出手、盘中扫到几只、
+      盘后任务跑到哪了，不用逐页翻。</p>
   </nav>
 
   <main class="panes" id="panes">
 
-  <!-- ========== 分区 1 · 今日结论 ==========
-       回答唯一的主问题：「今天要不要动手」。广度和候选股出自同一份数据，
-       所以放在同一页里，不用来回切。 -->
-  <section class="pane" id="pane-today" role="tabpanel" aria-labelledby="tab-today" tabindex="-1">
+  <!-- ========== 盘前结论 ==========
+       回答唯一的主问题：「今天开盘动不动手」。
+       数据来自最近一个已收盘交易日 —— 也就是"昨天的数据，今天照它执行"。
+       （原来叫「今日结论」，和「盘前任务」分在两处：结论在这里、操作清单
+         在任务中心，同一件事要看两个页面，现在合到一页。） -->
+  <section class="pane" id="pane-pre" role="tabpanel" aria-labelledby="tab-pre" tabindex="-1">
 
-  <!-- 今日广度：整个页面的第一眼答案 -->
+  <div class="phead">
+    <div>
+      <h2>盘前结论</h2>
+      <p class="sub">总结<b>最近一个已收盘交易日</b>的数据，回答一个问题：<b>今天开盘要不要动手、买哪只</b>。
+        开盘前看到的那份结论，就是这一页。</p>
+    </div>
+    <div class="phead-act">
+      <span class="pill wait" id="prePill">读取中…</span>
+      <button class="btn btn-sm btn-ghost" onclick="runTask('premarket')">▶ 跑一次盘前任务</button>
+    </div>
+  </div>
+
+  <!-- 数据源还没发布当日行情时在这里说清楚，默认隐藏 -->
+  <div class="stale" id="dataWarn" role="status" aria-live="polite"></div>
+
+  <!-- 结论：整个页面的第一眼答案 -->
   <div class="card">
-    <h2>今日广度 <span class="tag" id="tagDate">—</span></h2>
+    <h2>今天要不要动手 <span class="tag" id="tagDate">—</span></h2>
     <div class="verdict">
       <div class="gauge" id="breadthBox">
         <span class="num" id="breadthNum">—</span>
@@ -836,16 +1078,16 @@ details.hform-w[open]>summary::before{content:"－ "}
           <div class="kv">全市场股票：<b id="mTotal">—</b> 只</div>
           <div class="kv">仅乖离率 ≤ -15%（全市场）：<b id="mBias">—</b> 只</div>
           <div class="kv" id="kvMain">沪深主板达标：<b id="mMain">—</b> 只</div>
+          <!-- ★ 两把尺子必须并排出现：上面的仪表写「全市场门槛 ≥ 50」，
+               这里写「主板门槛 ≥ 30」。只给全市场那个，用户会以为
+               主板数字低就是没机会；并排放才读得懂"哪个数字对哪个门槛"。 -->
+          <div class="kv">沪深主板门槛：<b id="mThMain">—</b></div>
           <div class="kv">沪深主板仅乖离率：<b id="mBiasMain">—</b> 只</div>
         </div>
       </div>
     </div>
-    <!-- 数据源还没发布当日行情时在这里说清楚，默认隐藏 -->
-    <div class="stale" id="dataWarn" role="status" aria-live="polite"></div>
   </div>
 
-  <!-- 今日候选股：与上面的广度出自同一份数据、回答同一个问题
-       （「今天动不动手 → 动手买哪只」），所以归在同一个分区里 -->
   <div class="card">
     <h2>今日候选股 <span class="tag" id="tagCand">仅达标时显示</span></h2>
     <div id="candBox"><div class="empty"><span class="empty-mark">✓</span>
@@ -853,76 +1095,139 @@ details.hform-w[open]>summary::before{content:"－ "}
       <p class="empty-note">空仓等待是策略的一部分 —— 机会一年只有几次。</p></div></div>
   </div>
 
+  <!-- 盘前任务产出的「今日操作清单」：卖什么、买什么、怎么买。
+       与上面的候选股表同源，所以任务结果里那张重复的买入清单会被跳过。 -->
+  <div class="card">
+    <h2>今日操作清单 <span class="tag" id="tagPreRes">盘前任务产出</span></h2>
+    <div id="res-premarket"><div class="empty"><span class="empty-mark">🌅</span>
+      <p class="empty-title">还没有盘前清单</p>
+      <p class="empty-note">跑一次「盘前任务」（几秒钟），这里会列出今天要卖的持仓、要买的候选股，
+        以及每只怎么买。也可以让它每天 09:10 自动跑。</p>
+      <button class="btn btn-primary" onclick="runTask('premarket')">▶ 跑一次盘前任务</button>
+    </div></div>
+  </div>
+
+  <details class="dock" id="dock-premarket"></details>
+
   </section>
 
-  <!-- ========== 分区 2 · 盘中参考 ==========
-       整页唯一「当天可决策」的地方，也是内容最多的一页，所以页内再分段。 -->
+  <!-- ========== 盘中参考 ==========
+       整页唯一「当天可决策」的地方：用实时快照推演今天的广度。
+       同样把「盘中任务」并了进来 —— 它原本单独占一个菜单。 -->
   <section class="pane" id="pane-intra" role="tabpanel" aria-labelledby="tab-intra"
            tabindex="-1" hidden>
-  <div class="card" id="intraCard">
-    <h2>盘中参考 <span class="tag" id="tagIntra">等待盘中任务</span></h2>
 
-    <!-- 实时更新控制条
-         ★ 放在 intraBox **之外**：下面那张卡片的内容每次刷新都会整体重建，
-           控制条若放在里面，倒计时和选中态会被反复清掉、按钮还会失焦。
-         ★ 运行中把间隔选择锁住、只留「停止更新」可点 —— 否则「改了间隔
-           到底什么时候生效」是个说不清的中间态。 -->
-    <div class="livebar" id="liveBar">
-      <button class="btn btn-sm btn-primary" id="btnLive" type="button"
-              onclick="toggleLive()">⟳ 实时更新</button>
-      <label class="live-f" id="liveIntLab" for="liveInt">每
-        <select id="liveInt" aria-label="实时更新间隔">
-          <option value="30">30 秒</option>
-          <option value="60" selected>1 分钟</option>
-          <option value="120">2 分钟</option>
-          <option value="300">5 分钟</option>
-        </select>
-      </label>
-      <span class="live-dot" id="liveDot" aria-hidden="true"></span>
-      <!-- ★ 这里刻意**不用** aria-live：状态行里带着每秒跳动的倒计时，
-         放进 live region 会让读屏软件每一秒念一次，把真正重要的内容全盖掉。
-         状态变化本身由按钮文案（实时更新 ⇄ 停止更新）承载，那是可聚焦元素。 -->
-      <span class="live-st" id="liveSt">加载中…</span>
+  <div class="phead">
+    <div>
+      <h2>盘中参考</h2>
+      <p class="sub">用<b>实时行情推演</b>今天的信号广度，不用等收盘。
+        越接近 14:30~15:00 越准，最终以收盘后的「盘后总结」为准。</p>
     </div>
+    <div class="phead-act">
+      <span class="pill wait" id="intraPill">还没有扫描结果</span>
+      <button class="btn btn-sm btn-ghost" onclick="runTask('intraday')">▶ 跑一次盘中任务</button>
+    </div>
+  </div>
 
+  <!-- 实时更新控制条
+       ★ 独立一行、不属于任何卡片：下面那张卡片的内容每次刷新都会整体重建，
+         控制条若放在里面，倒计时和选中态会被反复清掉、按钮还会失焦。
+       ★ 运行中把间隔选择锁住、只留「停止更新」可点 —— 否则「改了间隔
+         到底什么时候生效」是个说不清的中间态。 -->
+  <div class="livebar" id="liveBar">
+    <button class="btn btn-sm btn-primary" id="btnLive" type="button"
+            onclick="toggleLive()">⟳ 实时更新</button>
+    <label class="live-f" id="liveIntLab" for="liveInt">每
+      <select id="liveInt" aria-label="实时更新间隔">
+        <option value="30">30 秒</option>
+        <option value="60" selected>1 分钟</option>
+        <option value="120">2 分钟</option>
+        <option value="300">5 分钟</option>
+      </select>
+    </label>
+    <span class="live-dot" id="liveDot" aria-hidden="true"></span>
+    <!-- ★ 这里刻意**不用** aria-live：状态行里带着每秒跳动的倒计时，
+       放进 live region 会让读屏软件每一秒念一次，把真正重要的内容全盖掉。
+       状态变化本身由按钮文案（实时更新 ⇄ 停止更新）承载，那是可聚焦元素。 -->
+    <span class="live-st" id="liveSt">加载中…</span>
+  </div>
+
+  <div class="card" id="intraCard">
+    <h2>两张清单 <span class="tag" id="tagIntra">等待盘中任务</span></h2>
     <div id="intraBox"><div class="empty"><span class="empty-mark">⏱</span>
       <p class="empty-title">还没有盘中扫描结果</p>
-      <p class="empty-note">点上面「⟳ 实时更新」马上扫一次，或到「任务中心 → 盘中任务」执行
-        （建议 14:30）。这里会给出两张当天的参考清单：全套条件达标的、以及仅乖离率符合的。</p></div></div>
+      <p class="empty-note">点上面「⟳ 实时更新」马上扫一次（几秒，不留记录），
+        或点右上角「▶ 跑一次盘中任务」（会写入一条历史记录）。
+        建议 14:30 左右跑 —— 那时时间进度已过 87%，推演结果最接近收盘。</p></div></div>
   </div>
+
+  <!-- 盘中任务的产出明细：今日盘中概览、持仓实时体检、口径说明。
+       两张清单本身由上面的卡片呈现，这里跳过，避免同一张表出现两次。 -->
+  <div class="card">
+    <h2>任务明细与口径 <span class="tag" id="tagIntraRes">盘中任务产出</span></h2>
+    <div id="res-intraday"><div class="empty"><span class="empty-mark">📋</span>
+      <p class="empty-title">还没有盘中任务记录</p>
+      <p class="empty-note">跑一次「盘中任务」后，这里会出现当天的盘中概览（扫描只数、
+        时间进度、两把尺子的口径）和持仓的实时体检结果。</p>
+    </div></div>
+  </div>
+
+  <details class="dock" id="dock-intraday"></details>
 
   </section>
 
-  <!-- ========== 分区 3 · 任务中心 ========== -->
-  <section class="pane" id="pane-task" role="tabpanel" aria-labelledby="tab-task"
+  <!-- ========== 盘后总结 ==========
+       收盘后更新全市场数据的地方 —— 也是「数据日期」这个词的来源。
+       并进来之后，用户不用再记住"更新数据要去任务中心点盘后任务"。 -->
+  <section class="pane" id="pane-post" role="tabpanel" aria-labelledby="tab-post"
            tabindex="-1" hidden>
-  <div class="card" id="taskCard">
-    <h2>任务中心 <span class="tag">什么时候跑，由你决定</span></h2>
-    <div class="banner info show" style="margin-bottom:var(--s-4)">
-      ★ 三个任务默认<b>全都是「不定时」</b>的。你可以随时点「立即执行」马上跑一次，
-      或者打开「定时执行」开关，让它每天到点自动跑。<b>网站本身绝不会自己偷偷定时。</b><br>
-      要更新数据，就进 <b>🌙 盘后任务</b> 点「立即执行」—— 全市场下载都在那里。
+
+  <div class="phead">
+    <div>
+      <h2>盘后总结</h2>
+      <p class="sub">收盘后<b>更新全市场数据</b>（约 20~25 分钟），算出今天的信号广度，
+        并给出<b>明天的</b>操作计划。页面上所有数字都来自这里跑出来的那份数据。</p>
     </div>
-
-    <!-- ★ 三个任务做成标签栏，一次只展开一个。
-         原来是三张卡片竖排，每张都带说明 + 定时设置 + 进度 + 历史记录 + 结果明细，
-         全摊开要滚三屏多，想找「盘后任务」得先越过另外两个任务的整套设置。 -->
-    <div class="subtabs tasktabs" id="taskTabs" role="tablist" aria-label="任务切换"></div>
-
-    <div id="taskList"><div class="empty"><span class="empty-mark">⋯</span>
-      <p class="empty-title">正在读取任务状态</p></div></div>
+    <div class="phead-act">
+      <span class="pill wait" id="postPill">读取中…</span>
+      <button class="btn btn-sm btn-primary" onclick="runTask('postmarket')">▶ 更新数据（盘后任务）</button>
+    </div>
   </div>
+
+  <div class="card">
+    <h2>数据状态 <span class="tag">全市场 5017 只</span></h2>
+    <div class="stats" id="postStats"></div>
+    <p class="intra-note" id="postNote">正在读取…</p>
+  </div>
+
+  <div class="card">
+    <h2>盘后总结报告 <span class="tag" id="tagPostRes">盘后任务产出</span></h2>
+    <div id="res-postmarket"><div class="empty"><span class="empty-mark">🌙</span>
+      <p class="empty-title">还没有盘后总结</p>
+      <p class="empty-note">跑一次「盘后任务」后，这里会出现今天的完整总结：今日数据概览、
+        明日买入候选股、明日怎么操作、以及持仓体检结果。</p>
+      <button class="btn btn-primary" onclick="runTask('postmarket')">▶ 更新数据（盘后任务）</button>
+    </div></div>
+  </div>
+
+  <details class="dock" id="dock-postmarket"></details>
 
   </section>
 
-  <!-- ========== 分区 4 · 历史走势 ========== -->
+  <!-- ========== 历史走势 ========== -->
   <section class="pane" id="pane-hist" role="tabpanel" aria-labelledby="tab-hist"
            tabindex="-1" hidden>
-  <!-- 历史广度 -->
+
+  <div class="phead">
+    <div>
+      <h2>历史走势</h2>
+      <p class="sub">近 250 个交易日的信号广度。<b>柱子越高 ＝ 市场越恐慌 ＝ 机会越大</b>，
+        回答的是那个最实际的问题：机会到底多久来一次、上一次是什么时候。</p>
+    </div>
+  </div>
+
   <div class="card">
-    <h2>历史广度走势 <span class="tag">近 250 个交易日</span></h2>
-    <!-- 复盘用的一组数字：机会到底多久来一次。原先这一页只有一张图，
-         看得出形状，却答不出「上次达标是什么时候」这个最实际的问题。 -->
+    <h2>每日信号广度 <span class="tag">近 250 个交易日</span></h2>
     <div class="stats" id="histStats"></div>
     <div class="chart-wrap"><canvas id="chart" role="img"
       aria-label="近 250 个交易日的每日信号广度柱状图，含出手门槛参考线"></canvas></div>
@@ -935,18 +1240,26 @@ details.hform-w[open]>summary::before{content:"－ "}
 
   </section>
 
-  <!-- ========== 分区 5 · 我的持仓 ========== -->
+  <!-- ========== 我的持仓 ========== -->
   <section class="pane" id="pane-hold" role="tabpanel" aria-labelledby="tab-hold"
            tabindex="-1" hidden>
-  <!-- 我的持仓 -->
+
+  <div class="phead">
+    <div>
+      <h2>我的持仓</h2>
+      <p class="sub">登记真实的买入日期与买入价，页面自动帮你盯<b>止损线、止盈线</b>和
+        <b>最长持有天数</b>，触发时在菜单上亮红点。</p>
+    </div>
+  </div>
+
   <div class="card">
-    <h2>我的持仓 <span class="tag" id="tagHold">止损 -6% · 止盈 +6%/+10% · 最长 10 日</span></h2>
+    <h2>持仓清单 <span class="tag" id="tagHold">止损 -6% · 止盈 +6%/+10% · 最长 10 日</span></h2>
     <!-- 录入表单可折叠：有持仓时让表格成为这一页的第一眼，不占首屏。
          没有持仓时由 JS 自动展开，不会让人找不到入口。 -->
     <details class="hform-w" id="hformWrap" open>
       <summary>登记新持仓</summary>
     <div class="hform">
-      <div><label for="fCode">股票代码</label><input id="fCode" placeholder="如 300274" inputmode="numeric"></div>
+      <div><label for="fCode">股票代码</label><input id="fCode" placeholder="如 600519" inputmode="numeric"></div>
       <div><label for="fName">名称（可空）</label><input id="fName" placeholder="自动填"></div>
       <div><label for="fDate">买入日期</label><input id="fDate" type="date"></div>
       <div><label for="fPrice">买入价</label><input id="fPrice" placeholder="如 91.50" inputmode="decimal"></div>
@@ -966,7 +1279,7 @@ details.hform-w[open]>summary::before{content:"－ "}
   <footer>
     本工具仅提供数据参考，<b>不构成投资建议</b>。数据来源：新浪财经（本地缓存）。<br>
     新浪的「当日」日线通常要到当天傍晚才发布；如果页面提示「数据源尚未发布」，
-    稍晚再跑一次「盘后任务」即可。<br>
+    稍晚到「盘后总结」再点一次「更新数据」即可。<br>
     只在广度 ≥ 门槛（高胜率窗口）时出手；其余时间空仓等待，是策略的一部分。
   </footer>
 </div>
@@ -1012,28 +1325,33 @@ const LIVE_MAX_FAIL=3, LIVE_MAX_DENY=5;
      ② 点菜单只写 localStorage 和 hash（replaceState，不往历史里堆记录）；
      ③ 唯一"自动"的动作是任务跑完后刷新菜单角标，绝不自动跳页。
    ========================================================================== */
-const PANE_LIST=['today','intra','task','hold','hist'];
+const PANE_LIST=['pre','intra','post','hold','hist'];
+/* 旧版本的分区名（today=今日结论 / task=任务中心）→ 新分区名。
+   老用户在地址栏或 localStorage 里存过旧名字，映射一下，不让他掉回默认页。 */
+const PANE_ALIAS={today:'pre', task:'post'};
 const PANE_KEY='bia_pane';
 let CUR_PANE=null;
 
 const navBtns = () => Array.from(document.querySelectorAll('#nav .nav-i'));
-const paneOk  = k => PANE_LIST.indexOf(k) >= 0;
+/* 把任意写法（含旧名）解析成合法的分区名；解析不出来返回 null */
+const paneKey = k => { k=PANE_ALIAS[k]||k; return PANE_LIST.indexOf(k)>=0 ? k : null; };
+const paneOk  = k => !!paneKey(k);
 
 /* 打开页面时落在哪一页 */
 function defaultPane(){
-  const h=(location.hash||'').replace(/^#/,'');
-  if(paneOk(h)) return h;
-  try{ const s=localStorage.getItem(PANE_KEY); if(paneOk(s)) return s; }catch(e){}
+  const h=paneKey((location.hash||'').replace(/^#/,''));
+  if(h) return h;
+  try{ const s=paneKey(localStorage.getItem(PANE_KEY)); if(s) return s; }catch(e){}
   /* 交易时段（工作日 09:25–15:05）默认落在「盘中参考」—— 这正是用户这个点
-     打开页面唯一要看的东西；其余时间落在永远有内容的「今日结论」。 */
+     打开页面唯一要看的东西；其余时间落在永远有内容的「盘前结论」。 */
   const d=new Date(), mins=d.getHours()*60+d.getMinutes(), wd=d.getDay();
   if(wd>=1 && wd<=5 && mins>=565 && mins<=905) return 'intra';
-  return 'today';
+  return 'pre';
 }
 
 function showPane(key, opts){
   opts=opts||{};
-  if(!paneOk(key)) key='today';
+  key = paneKey(key) || 'pre';
   if(CUR_PANE===key && !opts.force) return;
   CUR_PANE=key;
 
@@ -1079,8 +1397,8 @@ $('nav').addEventListener('keydown', function(e){
 
 /* 直接在地址栏改 #hash 也能切页（比对上当前页，避免自我触发） */
 window.addEventListener('hashchange', function(){
-  const h=(location.hash||'').replace(/^#/,'');
-  if(paneOk(h) && h!==CUR_PANE) showPane(h);
+  const h=paneKey((location.hash||'').replace(/^#/,''));
+  if(h && h!==CUR_PANE) showPane(h);
 });
 
 /* 菜单角标：每个分区「最该知道的那个数字」。
@@ -1130,28 +1448,79 @@ syncHdrH();
 window.addEventListener('resize', syncHdrH);
 if(window.ResizeObserver) new ResizeObserver(syncHdrH).observe(document.querySelector('header'));
 
-/* ============ 主题 ============ */
+/* ============ 配色方案 ============
+   四套配色在 CSS 里（[data-palette=...]），这里只负责「选哪套、记住、重画 Canvas」。
+   ★ 色块预览写的是与 CSS 完全相同的 oklch 值 —— 用真实颜色，不是近似色，
+     否则预览和点下去看到的效果不一致，比没有预览更糟。
+   ★ auto 不落成具体配色名，而是把「跟随系统」这个意图存下来；
+     系统深浅一变，matchMedia 会再把 auto 解析成 paper 或 ink。 */
+const PALETTES=[
+  {id:'auto',   name:'跟随系统', note:'电脑是深色就用「深夜」，否则用「纸白」',
+   sw:['oklch(95.4% .013 84)','oklch(19.8% .016 265)','oklch(51% .168 264)']},
+  {id:'paper',  name:'纸白',  note:'浅色 · 暖米底 + 纯白卡片，白天最舒服',
+   sw:['oklch(95.4% .013 84)','oklch(100% 0 0)','oklch(51% .168 264)']},
+  {id:'azure',  name:'雾蓝',  note:'浅色 · 冷青底，更"冷静"，长时间盯盘不累',
+   sw:['oklch(96% .011 238)','oklch(100% 0 0)','oklch(55% .152 232)']},
+  {id:'ink',    name:'深夜',  note:'深色 · 蓝黑底，暗环境下护眼',
+   sw:['oklch(14.4% .014 265)','oklch(19.8% .016 265)','oklch(70% .140 248)']},
+  {id:'carbon', name:'碳黑',  note:'深色 · 纯中性黑，OLED 屏上不发蓝',
+   sw:['oklch(13.6% 0 0)','oklch(18.8% 0 0)','oklch(75% .112 196)']},
+];
+const PAL_MODE={paper:'light', azure:'light', ink:'dark', carbon:'dark'};
+
+function renderThemeOpts(){
+  const box=$('themeOpts'); if(!box) return;
+  const cur=document.documentElement.getAttribute('data-theme-pref')||'auto';
+  box.innerHTML=PALETTES.map(p=>
+    '<button class="theme-opt" type="button" role="radio" data-pal="'+p.id+'" '+
+    'aria-checked="'+(p.id===cur?'true':'false')+'" onclick="applyTheme(\''+p.id+'\')">'+
+    '<span class="swatch" aria-hidden="true">'+
+      p.sw.map(c=>'<i style="background:'+c+'"></i>').join('')+'</span>'+
+    '<span class="t-txt"><span class="t-name">'+esc(p.name)+'</span>'+
+    '<span class="t-note">'+esc(p.note)+'</span></span></button>').join('');
+}
+
 function applyTheme(pref){
+  if(pref!=='auto' && !PAL_MODE[pref]) pref='auto';
   const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const theme = (pref==='dark' || (pref==='auto' && dark)) ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', theme);
-  document.documentElement.setAttribute('data-theme-pref', pref);
+  const pal = (pref==='auto') ? (dark?'ink':'paper') : pref;
+  const el=document.documentElement;
+  el.setAttribute('data-palette', pal);
+  el.setAttribute('data-mode', PAL_MODE[pal] || 'light');
+  el.setAttribute('data-theme-pref', pref);
   try{ localStorage.setItem('bia_theme', pref); }catch(e){}
-  document.querySelectorAll('#themeSeg .seg-btn').forEach(b=>
-    b.setAttribute('aria-checked', String(b.dataset.themePref === pref)));
-  // Canvas 不是 CSS，换主题后必须按新配色重画。
-  // 只在曲线这一页正显示时画：display:none 的容器量不到宽度，画出来是错的。
+  const nm=$('themeName'), p=PALETTES.find(x=>x.id===pref);
+  if(nm) nm.textContent = (pref==='auto' ? '跟随系统' : (p?p.name:'')) ;
+  document.querySelectorAll('#themeOpts .theme-opt').forEach(b=>
+    b.setAttribute('aria-checked', String(b.dataset.pal === pref)));
+  /* Canvas 不是 CSS，换配色后必须按新令牌重画。
+     只在曲线这一页正显示时画：display:none 的容器量不到宽度，画出来是错的。 */
   if(LAST_HIST && CUR_PANE==='hist') drawChart(LAST_HIST, LAST_TH);
 }
-document.querySelectorAll('#themeSeg .seg-btn').forEach(b=>
-  b.addEventListener('click', ()=> applyTheme(b.dataset.themePref)));
+
+function toggleThemePop(force){
+  const pop=$('themePop'), btn=$('btnTheme'); if(!pop) return;
+  const on = (force===undefined) ? !pop.classList.contains('show') : !!force;
+  pop.classList.toggle('show', on);
+  if(btn) btn.setAttribute('aria-expanded', String(on));
+}
+/* 点空白处 / 按 Esc 关掉弹层 —— 弹层不关会一直挡着顶栏右边那块 */
+document.addEventListener('click', e=>{
+  const w=document.querySelector('.themewrap');
+  if(w && !w.contains(e.target)) toggleThemePop(false);
+});
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape') toggleThemePop(false);
+});
+
 if(window.matchMedia){
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
   const onChange = ()=>{ if(document.documentElement.getAttribute('data-theme-pref')==='auto')
     applyTheme('auto'); };
   mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
 }
-// 首屏同步一次（内联脚本已经设过，这里保证按钮状态正确）
+renderThemeOpts();
+// 首屏同步一次（内联脚本已经设过，这里保证按钮文案与选中态正确）
 applyTheme(document.documentElement.getAttribute('data-theme-pref') || 'auto');
 
 /* 大数字滚动到位：只在数值真的变化时跑，且尊重「减少动态效果」设置 */
@@ -1266,19 +1635,62 @@ function setDataWarn(t){
   w.classList.toggle("show", on);
 }
 
+/* 分页头右上角那枚状态胶囊。三个时段页共用一套档位，含义不随页面变：
+   act=可以出手 / watch=有事但没到动手 / wait=平静 / bad=数据或网络有问题 */
+function setPill(id, txt, cls){
+  const e=$(id); if(!e) return;
+  e.className='pill '+(cls||'wait');
+  e.textContent=txt;
+}
+
+/* 「盘后总结」页的数据状态条。
+   这一页是"更新数据"的唯一入口，所以把"数据是哪天的、新不新鲜、什么时候更新的"
+   摆在第一屏 —— 用户判断"要不要再跑一次"全靠这几个数字，
+   而不必去比对别的页面。 */
+function renderPostStats(t){
+  const box=$('postStats'), note=$('postNote');
+  if(!box) return;
+  if(!t){
+    box.innerHTML='';
+    if(note) note.textContent='还没有任何数据 —— 先点右上角「更新数据（盘后任务）」跑一次。';
+    setPill('postPill','还没有数据','watch');
+    return;
+  }
+  const fresh=!t.stale;
+  box.innerHTML =
+    statBox('数据日期', t.date||'—', '', fresh) +
+    statBox('信号广度', fmt(t.breadth), '只', !!t.triggered) +
+    statBox('出手门槛', t.threshold, '只', false) +
+    statBox('沪深主板达标', fmt(t.breadth_main), '只', false) +
+    statBox('候选股', (t.candidates||[]).length, '只', false) +
+    statBox('数据源', fresh?'已发布':'未发布', '', false);
+  setPill('postPill',
+    fresh ? ('数据 '+t.date) : ('数据源未发布 '+(t.expected_date||'当日')+' 行情'),
+    fresh ? 'wait' : 'watch');
+  if(note){
+    note.innerHTML = fresh
+      ? '数据已是最新：<b>'+esc(t.date)+'</b> 收盘，更新于 '+esc((t.updated_at||'').replace('T',' '))+
+        '。再跑一次不会更快 —— 新浪的「当日」日线通常要到当天傍晚才发布。'
+      : '⏳ <b>数据源还没发布 '+esc(t.expected_date||'今天的')+' 日线</b> —— '+
+        '现在跑盘后任务，拿到的仍是 '+esc(t.date)+' 那一天的数据。傍晚再跑即可，重复跑不会更快。';
+  }
+}
+
 async function loadToday(){
   const t=await jget("/api/today");
   if(!t.ok){
     // ★ 无数据时必须把首屏从「加载中…」改成一个明确的说法，
     //   否则页面会一直停在 loading 状态，用户以为程序没跑起来。
-    showBanner(t.msg||"尚无数据，请到「任务中心 → 盘后任务」点一次「立即执行」。","err");
+    showBanner(t.msg||"尚无数据，请到「盘后总结」点一次「更新数据」。","err");
     const act=$("actionText");
-    act.textContent="还没有数据 —— 先跑一次盘后任务";
+    act.textContent="还没有数据 —— 先到「盘后总结」更新一次数据";
     act.className="conclusion act-no";
     $("breadthBox").className="gauge";
     $("tagCand").textContent="仅达标时显示";
     setDataWarn(null);
-    setNav('today','—',false);
+    setNav('pre','—',false);
+    setPill('prePill','还没有数据','watch');
+    renderPostStats(null);
     return;
   }
   hideBanner();
@@ -1298,6 +1710,8 @@ async function loadToday(){
   $("mTotal").textContent = fmt(t.stocks_total);
   const mMain=$("mMain");
   if(mMain) mMain.textContent = (t.breadth_main==null) ? "—" : fmt(t.breadth_main);
+  const mThMain=$("mThMain");
+  if(mThMain) mThMain.textContent = (t.threshold_main==null) ? "—" : ("≥ "+fmt(t.threshold_main)+" 只");
   // ★ 主板口径的「仅乖离率」也要露出来：全市场 20 只 vs 主板 10 只，
   //   只给全市场数字会让用户以为一半都不在主板上——其实他只能看主板那 10 只。
   const mBiasMain=$("mBiasMain");
@@ -1312,7 +1726,7 @@ async function loadToday(){
     cb.innerHTML = t.triggered
       ? '<div class="empty"><span class="empty-mark">✓</span>'+
         '<p class="empty-title">达标，但没有符合条件的个股</p>'+
-        '<p class="empty-note">极少见。可到「任务中心」跑一次「盘前任务」看更细的清单。</p></div>'
+        '<p class="empty-note">极少见。可到「盘后总结」确认一下数据是不是最新的。</p></div>'
       : '<div class="empty"><span class="empty-mark">✓</span>'+
         '<p class="empty-title">广度未达标，今天不用看个股</p>'+
         '<p class="empty-note">空仓等待是策略的一部分 —— 机会一年只有几次。</p></div>';
@@ -1341,11 +1755,19 @@ async function loadToday(){
   /* 菜单角标：这一页最该知道的数字就是「今天的广度」。
      ★ 只有达标（＝策略允许出手）时才亮红点。不亮就代表今天真没事 ——
        这个"不亮"本身也是有用信息，比常年恒亮的点诚实得多。 */
-  setNav('today', '广度 '+fmt(t.breadth), !!t.triggered, t.triggered?'hot':'');
+  setNav('pre', '广度 '+fmt(t.breadth), !!t.triggered, t.triggered?'hot':'');
   /* 用户只买沪深主板，主板达标数才是他真正的机会数。
      有值时高亮出来，别让「全市场」那个大数字把注意力全抢走。 */
   const kvM=$('kvMain');
   if(kvM) kvM.className='kv'+((t.breadth_main!=null && +t.breadth_main>0)?' hot':'');
+  /* 页头胶囊：一句话把"今天动不动手"答掉 —— 不给它，用户就得自己
+     把广度、门槛、主板门槛三个数字对照着读一遍才能得出结论。 */
+  if(t.stale) setPill('prePill','数据源未发布 '+(t.expected_date||'当日')+' 行情','watch');
+  else setPill('prePill',
+    t.triggered ? ('★ 今天可以出手 · 主板 '+fmt(t.breadth_main)+' 只') : '今天不动手 · 空仓等待',
+    t.triggered ? 'act' : 'wait');
+  /* 盘后总结页的数据状态条与同一份数据同源，顺手一起刷 */
+  renderPostStats(t);
 }
 
 /* ============================================================================
@@ -1407,14 +1829,14 @@ async function loadIntraday(){
     tag.textContent="等待盘中任务";
     box.innerHTML='<div class="empty"><span class="empty-mark">⏱</span>'+
       '<p class="empty-title">还没有盘中扫描结果</p>'+
-      '<p class="empty-note">'+esc(d.msg||"需要先跑一次「盘中任务」。")+
+      '<p class="empty-note">'+esc(d.msg||"需要先扫一次。")+
       '它用实时行情推演当天广度，只要几秒。<br>'+
-      '建议 14:30 左右跑 —— 那时时间进度已过 87%，推演结果最接近收盘。</p>'+
-      /* ★ 一键直达：原来这里只写「到任务中心跑一次」，用户还得切页再找。
-         盘中任务只要几秒，直接把按钮放在缺东西的这个地方，少两步操作。 */
-      '<button class="btn btn-primary" onclick="runTask(\'intraday\')">▶ 立即执行盘中任务</button>'+
+      '点上面「⟳ 实时更新」马上扫（不留记录），或点右上角「▶ 跑一次盘中任务」。'+
+      '建议 14:30 左右 —— 那时时间进度已过 87%，推演结果最接近收盘。</p>'+
+      '<button class="btn btn-primary" onclick="runTask(\'intraday\')">▶ 跑一次盘中任务</button>'+
       '</div>';
     navIntra('待跑', false);
+    setPill('intraPill','还没有扫描结果','wait');
     LIVE_CLOSED=false;
     return;
   }
@@ -1446,7 +1868,7 @@ async function loadIntraday(){
   if(staleDay){
     h+='<p class="intra-note" style="color:var(--warn)">⏳ <b>这不是今天的扫描</b> —— '+
        '下面显示的是 '+esc(d.quote_date)+' 那一次「盘中任务」的结果，行情已经过时，'+
-       '只能当历史记录看。<br>要看今天的：到「任务中心」点一次「盘中任务」的「立即执行」'+
+       '只能当历史记录看。<br>要看今天的：点上面「⟳ 实时更新」马上扫一次'+
        '（建议 14:30 左右，那时时间进度已过 87%，最接近收盘）。</p>';
   }
   h+='<div class="iph"><span class="pill '+pcls+'">'+esc(ptxt)+'</span>'+
@@ -1535,6 +1957,13 @@ async function loadIntraday(){
   else if(pool>0)   navIntra(pool+' 只', true, 'hot');
   else if(nearN>0)  navIntra(nearN+' 只', true, '');
   else              navIntra('无', false);
+
+  /* 页头胶囊：这一页最该知道的是「扫的是哪一刻」。隔天的旧结果必须标出来，
+     否则用户会把昨天的清单当成今天的。 */
+  setPill('intraPill',
+    staleDay ? ('上次扫描 '+esc(d.quote_date||'')+'（已过时）')
+             : (esc(d.quote_date||'')+' '+esc(d.quote_time||'')),
+    staleDay ? 'watch' : ((gate||gateM) ? 'act' : (nearN>0 ? 'watch' : 'wait')));
 }
 
 /* ============================================================================
@@ -1696,7 +2125,7 @@ async function refreshLive(){
   /* ★ 收盘自动收手：快照已经等于收盘价，再按秒刷不会有新信息。 */
   if(LIVE_CLOSED){
     stopLive('已收盘（快照＝收盘价），实时更新已自动停止。'+
-             '要拿到最终定论，跑一次「任务中心 → 盘后任务」。'); return;
+             '要拿到最终定论，到「盘后总结」点一次「更新数据」。'); return;
   }
   renderLive();
 }
@@ -1975,15 +2404,28 @@ function renderBlocks(blocks){
   return h;
 }
 
-/* ★ 三个任务做成标签栏，一次只展开一个。
-   原来是三张卡片竖排，每张都带「说明 + 定时设置 + 进度 + 历史记录 + 结果明细」，
-   全摊开要滚三屏多 —— 想找「盘后任务」得先越过另外两个任务的整套设置。
-   标签上直接带状态胶囊（未开启 / 每天 HH:MM / 执行中 xx%），
-   不点进去也知道另外两个任务现在是什么情况。 */
-const TASK_TAB_KEY='bia_task_tab';
-let TASK_DATA=null, TASK_TAB=null;
-const TASK_UI={more:{}, hist:{}};   // 「说明」与「历史记录」的展开状态，切页要保留
+/* ============================================================================
+   任务坞（每个时段分页底部那块折叠起来的「⚙ 定时与记录」）
+   ----------------------------------------------------------------------------
+   为什么把「任务中心」这一层菜单拆掉：三个任务各自只服务一个分页 ——
+   盘前任务产出的就是「盘前结论」里的操作清单，盘后任务产出的就是「盘后总结」。
+   把任务单独放在一层菜单里，用户为了"刷新今天的数据"还得多跳一页再看一眼。
+   现在：产出的结果明细直接进正文，调度与历史记录收进各页底部这块折叠区。
+
+   ★ 折叠而不是删掉：定时开关、执行时间、星期、历史记录这些平时不看、
+     偶尔要改一次的东西，占着正文就是噪声，藏起来又必须找得到。
+   ========================================================================== */
+let TASK_DATA=null;
+const TASK_UI={hist:{}};            // 「历史执行记录」的展开状态，重绘要保留
 let RES_CACHE={}, HIST_CACHE={};    // 分别按 run id / 任务 key 缓存，切来切去不重复请求
+/* 任务 key → 它所在的分页 key，以及结果容器的 id 前缀。 */
+const TASK_PANE={premarket:'pre', intraday:'intra', postmarket:'post'};
+const TASK_PILL={premarket:'prePill', intraday:'intraPill', postmarket:'postPill'};
+const TASK_RESTAG={premarket:'tagPreRes', intraday:'tagIntraRes', postmarket:'tagPostRes'};
+/* ★ 结果块里与该页正文重复的部分要跳过，否则同一张表会出现两次：
+   · 盘前任务的「今日开盘买入清单」＝ 正文的「今日候选股」
+   · 盘中任务的「达标清单 / 仅乖离率」＝ 正文的「两张清单」 */
+const TASK_SKIP={premarket:['candidates'], intraday:['intraday'], postmarket:[]};
 
 function taskStat(t){
   if(t.running){
@@ -1995,63 +2437,33 @@ function taskStat(t){
   return {txt:'未开启', cls:''};
 }
 
-function renderTaskTabs(){
-  const box=$('taskTabs'); if(!box || !TASK_DATA) return;
-  box.innerHTML=(TASK_DATA.tasks||[]).map(t=>{
-    const c=taskStat(t);
-    return '<button class="subtab" type="button" role="tab" data-task="'+t.key+'" '+
-      'aria-selected="'+(t.key===TASK_TAB)+'" onclick="showTaskTab(\''+t.key+'\')">'+
-      '<span aria-hidden="true">'+t.icon+'</span>'+esc(t.name.replace('任务',''))+
-      '<span class="cnt '+c.cls+'" id="tst-'+t.key+'">'+esc(c.txt)+'</span></button>';
-  }).join('');
-}
-
-function showTaskTab(key){
-  if(key===TASK_TAB) return;
-  TASK_TAB=key;
-  try{ localStorage.setItem(TASK_TAB_KEY, key); }catch(e){}
-  renderTaskTabs();
-  renderTaskCard();
-}
-
-function renderTasks(data){
+/* 一次把三个任务的坞都渲染出来。它们分处三个分页，互不影响。 */
+function renderDocks(data){
   TASK_DATA=data;
-  const list=data.tasks||[], keys=list.map(t=>t.key);
-  if(!TASK_TAB || keys.indexOf(TASK_TAB)<0){
-    let k=null;
-    try{ k=localStorage.getItem(TASK_TAB_KEY); }catch(e){}
-    if(!k || keys.indexOf(k)<0){
-      /* 首次进来优先展示「正在跑的那个」——用户多半就是为它来的；
-         都没在跑就落在第一个。★ 只在这一次自动选，之后不再跳 ——
-         否则用户正看着盘前，盘后一开始跑就被弹走。 */
-      const r=list.find(t=>t.running);
-      k=r ? r.key : keys[0];
-    }
-    TASK_TAB=k;
-  }
-  renderTaskTabs();
-  renderTaskCard();
-
-  /* 菜单角标：任务中心最该知道的是「现在有没有在跑」。
-     盘后任务要跑 20 分钟，用户切到别的分区时全靠这个角标知道它还在跑。 */
+  for(const t of (data.tasks||[])) renderDock(t);
+  /* 菜单角标：哪个任务在跑，就把它所在那一页的角标改成进度。
+     盘后任务要跑 20 分钟，用户切到别的分页时全靠这个角标知道它还在跑。 */
+  const list=data.tasks||[];
   const runT=list.find(t=>t.running);
   if(runT){
     const p=(runT.progress&&runT.progress.total>0)
       ? Math.round(runT.progress.done/runT.progress.total*100) : 0;
-    setNav('task', p>0 ? p+'%' : '执行中', true, '');
-  }else{
-    setNav('task','',false);
+    const pane=TASK_PANE[runT.key]||'post';
+    if(pane==='intra') navIntra(p>0?p+'%':'执行中', true, '');
+    else               setNav(pane, p>0?p+'%':'执行中', true, '');
   }
+  /* 没有任务在跑时，盘后页的角标留空（盘前/盘中两页的角标各有自己的口径，
+     由 loadToday / loadIntraday 负责，这里不碰）。 */
+  if(!runT) setNav('post','',false);
 }
 
-/* 只渲染当前选中的那个任务。
-   ★ 与「取 /api/tasks」解耦：切标签是纯本地重绘，不必再请求一次后端。 */
-function renderTaskCard(){
+function renderDock(t){
+  const box=$('dock-'+t.key); if(!box) return;
   const list=(TASK_DATA&&TASK_DATA.tasks)||[];
-  const box=$('taskList'); if(!box) return;
-  const t=list.find(x=>x.key===TASK_TAB);
-  if(!t){ box.innerHTML=''; return; }
-  const running=t.running, busy=list.some(x=>x.running);
+  const running=!!t.running, busy=list.some(x=>x.running);
+  const c=taskStat(t);
+  /* 展开状态是重建 DOM 时补上去的，浏览器不会为它补发 toggle 事件 → 手动补一次 */
+  const wasOpen=box.open;
   const days=(t.days||'1,2,3,4,5').split(',');
   let dayBox='';
   for(const k of ['1','2','3','4','5','6','7'])
@@ -2068,75 +2480,83 @@ function renderTaskCard(){
       ' <span class="'+cls+'">['+nm+']</span> '+by+'</span><br>'+
       '<span>'+esc(last.title||'')+'</span>';
   }
-  const pct = (t.progress&&t.progress.total>0)
+  const pct=(t.progress&&t.progress.total>0)
     ? Math.round(t.progress.done/t.progress.total*100) : (running?3:0);
 
-  box.innerHTML='<div class="task '+(running?'running':'')+'" data-key="'+t.key+'">'+
-     '<div class="task-head"><div style="flex:1;min-width:240px">'+
-       '<div class="task-title"><span class="ico" aria-hidden="true">'+t.icon+'</span>'+esc(t.name)+
-         ' <span class="chip '+(t.enabled?'on':'off')+'">'+
-         (t.enabled?('定时 '+esc(t.at_time)):'未开启定时')+'</span></div>'+
-       '<div class="task-desc">'+esc(t.desc)+'</div>'+
-       '<div class="task-more'+(TASK_UI.more[t.key]?' show':'')+'" id="more-'+t.key+'">'+
-         esc(t.long_desc||'')+'</div>'+
-     '</div>'+
-     '<button class="btn btn-sm btn-ghost" onclick="toggleMore(\''+t.key+'\')">说明</button></div>'+
-
-     '<div class="task-row">'+
-       '<button class="btn btn-sm btn-primary" onclick="runTask(\''+t.key+'\')" '+
-         ((running||busy)?'disabled':'')+'>▶ 立即执行</button>'+
-       '<label class="sw"><input type="checkbox" id="en-'+t.key+'" '+(t.enabled?'checked':'')+'> 定时执行</label>'+
-       '<input type="time" id="tm-'+t.key+'" value="'+esc(t.at_time)+'" aria-label="定时时间">'+
-       '<span class="mini">星期</span><div class="days">'+dayBox+'</div>'+
-       '<button class="btn btn-sm btn-ghost" onclick="saveSchedule(\''+t.key+'\')">保存定时</button>'+
-     '</div>'+
-
-     '<div class="task-prog '+(running?'show':'')+'" id="prog-'+t.key+'">'+
-       '<div class="pbar"><i id="bar-'+t.key+'" style="width:'+pct+'%"></i></div>'+
-       '<div class="pmsg" id="pmsg-'+t.key+'">'+esc(running?(t.phase||'执行中'):'')+'…</div>'+
-     '</div>'+
-     '<div class="task-last">'+lastTxt+'</div>'+
-     '<details class="hist"'+(TASK_UI.hist[t.key]?' open':'')+
-       ' ontoggle="taskHistToggle(\''+t.key+'\',this.open)">'+
-       '<summary>查看历史执行记录</summary>'+
-       '<div class="hist-body" id="histb-'+t.key+'"></div></details>'+
-     '<div id="res-'+t.key+'"></div>'+
-  '</div>';
-
-  // 展开状态是重建 DOM 时补上去的，浏览器不会为它补发 toggle 事件 → 手动补一次
+  box.innerHTML=
+    '<summary><span>'+esc(t.name)+' · 定时与记录</span>'+
+      '<span class="cnt '+c.cls+'" id="dch-'+t.key+'">'+esc(c.txt)+'</span></summary>'+
+    '<div class="dock-body">'+
+      /* long_desc 里写了 **加粗** 标记，以前直接 esc() 会原样显示星号 —— 用 richText 吃进去 */
+      '<p class="dock-lead">'+richText(t.long_desc||'')+'</p>'+
+      '<div class="task-row">'+
+        '<button class="btn btn-sm btn-primary" onclick="runTask(\''+t.key+'\')" '+
+          ((running||busy)?'disabled':'')+'>▶ 立即执行</button>'+
+        '<label class="sw"><input type="checkbox" id="en-'+t.key+'" '+(t.enabled?'checked':'')+'> 定时执行</label>'+
+        '<input type="time" id="tm-'+t.key+'" value="'+esc(t.at_time)+'" aria-label="定时时间">'+
+        '<span class="mini">星期</span><div class="days">'+dayBox+'</div>'+
+        '<button class="btn btn-sm btn-ghost" onclick="saveSchedule(\''+t.key+'\')">保存定时</button>'+
+      '</div>'+
+      '<div class="task-prog '+(running?'show':'')+'" id="prog-'+t.key+'">'+
+        '<div class="pbar"><i id="bar-'+t.key+'" style="width:'+pct+'%"></i></div>'+
+        '<div class="pmsg" id="pmsg-'+t.key+'">'+esc(running?(t.phase||'执行中'):'')+'…</div>'+
+      '</div>'+
+      '<div class="task-last">'+lastTxt+
+        '<span class="mini">（三个任务默认都<b>不定时</b>，网站绝不会自己偷偷定时）</span></div>'+
+      '<details class="hist"'+(TASK_UI.hist[t.key]?' open':'')+
+        ' ontoggle="taskHistToggle(\''+t.key+'\',this.open)">'+
+        '<summary>查看历史执行记录</summary>'+
+        '<div class="hist-body" id="histb-'+t.key+'"></div></details>'+
+    '</div>';
+  /* ★ 用户在坞里改了定时、或正在看历史记录时，8 秒一次的轮询会重建这段 HTML ——
+     不还原展开态，坞会自己合上、历史列表也会消失。 */
+  if(wasOpen) box.open=true;
   if(TASK_UI.hist[t.key]) loadHist(t.key);
+  /* ★ 结果明细落在各页正文的 #res-<key> 里，由坞的渲染顺带触发。
+     漏掉这一句的后果：三个分页的正文永远停在空状态，
+     而坞看起来一切正常 —— 最难发现的一类"看起来没问题"。 */
   loadTaskResult(t);
 }
 
-/* 上次执行结果。★ 按 run id 缓存：切来切去、每 8 秒的版本轮询都不必重复拉取。 */
+/* 上次执行结果 → 落到它所属那一页的正文里。
+   ★ 按 run id 缓存：8 秒一次的版本轮询、来回切页都不必重复拉取。 */
 function loadTaskResult(t){
   const box=$('res-'+t.key); if(!box) return;
+  const tagId=TASK_RESTAG[t.key];
   const last=t.last_run;
   if(!last || last.status==='running') return;
   const rid=last.id;
-  if(RES_CACHE[rid]!==undefined){ box.innerHTML=RES_CACHE[rid]; return; }
+  if(RES_CACHE[rid]!==undefined){
+    box.innerHTML=RES_CACHE[rid];
+    if(tagId) $(tagId).textContent='上次执行 '+String(last.finished_at||last.started_at||'').replace('T',' ').slice(0,16);
+    return;
+  }
   jget('/api/tasks/'+t.key+'/result/'+rid).then(r=>{
     let h='';
-    if(r.ok && r.result && r.result.blocks) h=renderBlocks(r.result.blocks);
-    else if(r.ok && r.run && r.run.detail)
+    if(r.ok && r.result && r.result.blocks){
+      const skip=TASK_SKIP[t.key]||[];
+      const blocks=r.result.blocks.filter(b=>skip.indexOf(b.kind)<0);
+      /* 结论一句话放最上面：任务自己给的那句 headline（存在 run.title 里）——
+         它才是这次执行真正的答案，明细只是论据。 */
+      const head=(r.run && r.run.title) ? '<div class="conclusion-mini">'+esc(r.run.title)+'</div>' : '';
+      h=head+renderBlocks(blocks);
+      if(!blocks.length) h=head+'<p class="intra-note">这次执行的明细都在上面的表格里了。</p>';
+    }else if(r.ok && r.run && r.run.detail){
       h='<div class="blk"><div class="blk-txt">'+richText(r.run.detail)+'</div></div>';
+    }
     RES_CACHE[rid]=h;
     const b=$('res-'+t.key); if(b) b.innerHTML=h;
+    if(tagId && r.run) $(tagId).textContent='上次执行 '+String(r.run.finished_at||r.run.started_at||'').replace('T',' ').slice(0,16);
   }).catch(()=>{});
 }
 
 async function loadTasks(){
   try{
     const d=await jget('/api/tasks');
-    renderTasks(d);
+    renderDocks(d);
     // ★ 如果发现已有任务在跑（可能是控制台窗口触发的），自动开始显示进度
     if((d.tasks||[]).some(t=>t.running)) startTaskPoll();
   }catch(e){}
-}
-
-function toggleMore(k){
-  TASK_UI.more[k]=!TASK_UI.more[k];
-  const e=$('more-'+k); if(e) e.classList.toggle('show', TASK_UI.more[k]);
 }
 
 function taskHistToggle(key, open){
@@ -2169,11 +2589,9 @@ async function runTask(key){
   const r=await jpost('/api/tasks/'+key+'/run');
   showBanner(r.msg||'', r.ok?'info':'err');
   if(r.ok){
-    /* 任务是从哪里被点起来的，任务中心就停在那一页。
-       否则用户在「盘中参考」点了「▶ 立即执行盘中任务」，切到任务中心
-       看到的却是盘前的设置，还得自己再找一次。 */
-    TASK_TAB=key;
-    try{ localStorage.setItem(TASK_TAB_KEY, key); }catch(e){}
+    /* ★ 不再"跳去任务中心"（那一层已经没有了）—— 任务就在用户当前这一页，
+       直接把该任务的坞展开，进度条就是这个动作的反馈。 */
+    const dock=$('dock-'+key); if(dock) dock.open=true;
     await loadTasks(); startTaskPoll();
   }
 }
@@ -2184,12 +2602,13 @@ function startTaskPoll(){
   TASK_POLL=setInterval(async()=>{
     let d;
     try{ d=await jget('/api/tasks'); }catch(e){ return; }
-    /* 只更新进度条与标签胶囊，避免整块重绘打断操作。
-       ★ 标签胶囊三个都要更新（不只当前这一页的）：用户在「盘前」页时，
-         也得看得出盘后任务正在跑 —— 这正是分页栏最容易丢的信息。 */
+    /* 只更新进度条与状态胶囊，避免整块重绘打断操作。
+       ★ 三个任务的状态胶囊都要更新（不只当前这一页的）：用户在「盘前结论」
+         页时，也得看得出盘后任务正在跑 —— 这正是分页最容易丢的信息。 */
+    let runT=null;
     for(const t of d.tasks){
       const bar=$('bar-'+t.key), msg=$('pmsg-'+t.key), box=$('prog-'+t.key);
-      const chip=$('tst-'+t.key);
+      const chip=$('dch-'+t.key);
       if(box) box.classList.toggle('show', !!t.running);
       if(bar && t.running){
         bar.style.width=((t.progress&&t.progress.total>0)
@@ -2200,13 +2619,22 @@ function startTaskPoll(){
         const c=taskStat(t);
         if(chip.textContent!==c.txt){ chip.textContent=c.txt; chip.className='cnt '+c.cls; }
       }
+      if(t.running) runT=t;
+      /* 这一页右上角的胶囊也跟着改成进度 —— 用户切到该页时一眼知道在跑 */
+      if(t.running){
+        const p=(t.progress&&t.progress.total>0)
+          ? Math.round(t.progress.done/t.progress.total*100) : 0;
+        setPill(TASK_PILL[t.key], '正在执行'+(p>0?' '+p+'%':'…'), 'act');
+      }
     }
-    // 菜单角标同步进度：切到别的页也能一眼看到盘后任务跑到哪了
-    const runT=d.tasks.find(t=>t.running);
+    // 菜单角标同步进度：切到别的页也能一眼看到任务跑到哪了
     if(runT){
       const p=(runT.progress&&runT.progress.total>0)
         ? Math.round(runT.progress.done/runT.progress.total*100) : 0;
-      setNav('task', p>0 ? p+'%' : '执行中', true, '');
+      const txt = p>0 ? p+'%' : '执行中';
+      const pane=TASK_PANE[runT.key]||'post';
+      if(pane==='intra') navIntra(txt, true, '');
+      else               setNav(pane, txt, true, '');
     }
     if(!d.tasks.some(t=>t.running)){
       clearInterval(TASK_POLL); TASK_POLL=null;
@@ -2217,7 +2645,7 @@ function startTaskPoll(){
       await loadTasks(); await loadAll();
       // 数据真的变了时，startStatusWatch() 会紧跟一条更具体的提示
       //（"数据已更新到 X"）；这里只是兜底确认，避免用户以为页面卡住了。
-      bannerAuto("任务已执行完成，四张卡片已按最新数据刷新。","info",12000);
+      bannerAuto("任务已执行完成，本页已按最新数据刷新。","info",12000);
     }
   },3000);
 }

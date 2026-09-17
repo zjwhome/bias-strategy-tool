@@ -284,7 +284,7 @@ def run_premarket(log=None) -> dict:
         return dict(headline="还没有任何数据，请先跑一次「盘后任务」。",
                     level="warn",
                     blocks=[dict(title="怎么办", kind="text",
-                                 text="打开工具站 → 任务中心 → 点击「盘后任务」的「立即执行」。"
+                                 text="打开工具站 → 盘后总结 → 点右上角「更新数据（盘后任务）」。"
                                       "第一次需要约 20~25 分钟。")])
 
     th = d["threshold"]
