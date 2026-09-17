@@ -576,6 +576,45 @@ footer b{color:var(--ink-2)}
 .subtab[aria-selected="true"] .cnt{background:var(--brand-soft);color:var(--brand-ink)}
 .subpane[hidden]{display:none}
 
+/* ---- 任务中心：标签上的状态胶囊 ----
+   「未开启」保持灰的（默认态，不需要抢注意力），
+   「每天 HH:MM」用品牌色（这是个已生效的设置），
+   「执行中 xx%」用实心品牌色 + 呼吸（唯一需要立刻被看见的状态）。 */
+.tasktabs{margin-bottom:var(--s-4)}
+/* 选择器带上 .subtab：不带的话会被「选中标签的胶囊」那条规则
+   （.subtab[aria-selected="true"] .cnt）按特异性压过去 ——
+   于是当前这一页的「执行中」反而变成了普通胶囊底色。 */
+.subtab .cnt.run{background:var(--brand);color:var(--on-brand);
+  animation:breathe 1.8s var(--ease) infinite}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.55}}
+
+/* ---- 盘中参考 · 实时更新控制条 ----
+   ★ 运行中整条变品牌色底：一眼能看出「这个页面正在自己更新」，
+     不用去读文字。停止按钮用红（--up），与实心品牌色区分开。 */
+.livebar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-3);
+  padding:var(--s-3) var(--s-4);margin-bottom:var(--s-4);
+  border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--surface-2);
+  transition:background-color var(--dur-2) var(--ease),border-color var(--dur-2) var(--ease)}
+.livebar.on{background:var(--brand-soft);border-color:var(--brand-ring)}
+.live-f{display:inline-flex;align-items:center;gap:6px;font-size:var(--t-sm);
+  color:var(--ink-2);white-space:nowrap}
+.live-f.locked{opacity:.55}
+.livebar select{font:inherit;font-size:var(--t-sm);color:var(--ink);
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:6px 8px;min-height:34px;cursor:pointer}
+.livebar select:disabled{opacity:.55;cursor:not-allowed;background:var(--surface-3)}
+.live-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--line-2)}
+.livebar.on .live-dot{background:var(--brand);animation:breathe 1.6s var(--ease) infinite}
+.live-st{flex:1 1 240px;min-width:0;font-size:var(--t-xs);line-height:1.7;
+  color:var(--ink-2);font-variant-numeric:tabular-nums}
+.live-st b{color:var(--ink);font-weight:700}
+.live-st.warn,.live-st.warn b{color:var(--warn)}
+.live-st .bad{color:var(--warn);font-weight:700}
+.btn-stop{background:var(--up);color:var(--on-brand);box-shadow:0 1px 2px var(--up-ring)}
+.btn-stop:hover{color:var(--on-brand)}
+.btn-stop:active{transform:translateY(1px)}
+
 /* 分区内「登记新持仓」表单可折叠：有持仓时让表格成为第一眼，不占屏 */
 details.hform-w{margin-bottom:var(--s-4)}
 details.hform-w>summary{font-size:var(--t-sm);font-weight:600;color:var(--brand);
@@ -693,13 +732,18 @@ details.hform-w[open]>summary::before{content:"－ "}
       </div>
     </div>
     <div class="hdr-right">
-      <div class="hdr-meta" id="hRight">加载中…</div>
+      <!-- ★ 这里只留「真的出问题时才出现」的一句话。
+           原来常驻显示「数据日期 X / 更新于 Y」+ 一个「更新数据」按钮：
+           前者在「今日结论」页已经有（交易日 / 更新时间两行），重复；
+           后者和「任务中心 → 盘后任务 → 立即执行」是同一件事，两处入口反而
+           让人分不清该点哪个。现在收起来，只保留这一个救命的告警 ——
+           数据源没发布当日行情时必须能一眼看见，否则会把昨天的数字当今天用。 -->
+      <div class="hdr-meta" id="hRight" role="status" aria-live="polite"></div>
       <div class="seg" id="themeSeg" role="radiogroup" aria-label="配色主题">
         <button type="button" class="seg-btn" data-theme-pref="light" role="radio" aria-checked="false">浅色</button>
         <button type="button" class="seg-btn" data-theme-pref="dark" role="radio" aria-checked="false">深色</button>
         <button type="button" class="seg-btn" data-theme-pref="auto" role="radio" aria-checked="true">自动</button>
       </div>
-      <button class="btn btn-primary" id="btnUpdate">更新数据</button>
     </div>
   </div>
 </header>
@@ -817,10 +861,34 @@ details.hform-w[open]>summary::before{content:"－ "}
            tabindex="-1" hidden>
   <div class="card" id="intraCard">
     <h2>盘中参考 <span class="tag" id="tagIntra">等待盘中任务</span></h2>
+
+    <!-- 实时更新控制条
+         ★ 放在 intraBox **之外**：下面那张卡片的内容每次刷新都会整体重建，
+           控制条若放在里面，倒计时和选中态会被反复清掉、按钮还会失焦。
+         ★ 运行中把间隔选择锁住、只留「停止更新」可点 —— 否则「改了间隔
+           到底什么时候生效」是个说不清的中间态。 -->
+    <div class="livebar" id="liveBar">
+      <button class="btn btn-sm btn-primary" id="btnLive" type="button"
+              onclick="toggleLive()">⟳ 实时更新</button>
+      <label class="live-f" id="liveIntLab" for="liveInt">每
+        <select id="liveInt" aria-label="实时更新间隔">
+          <option value="30">30 秒</option>
+          <option value="60" selected>1 分钟</option>
+          <option value="120">2 分钟</option>
+          <option value="300">5 分钟</option>
+        </select>
+      </label>
+      <span class="live-dot" id="liveDot" aria-hidden="true"></span>
+      <!-- ★ 这里刻意**不用** aria-live：状态行里带着每秒跳动的倒计时，
+         放进 live region 会让读屏软件每一秒念一次，把真正重要的内容全盖掉。
+         状态变化本身由按钮文案（实时更新 ⇄ 停止更新）承载，那是可聚焦元素。 -->
+      <span class="live-st" id="liveSt">加载中…</span>
+    </div>
+
     <div id="intraBox"><div class="empty"><span class="empty-mark">⏱</span>
       <p class="empty-title">还没有盘中扫描结果</p>
-      <p class="empty-note">到「任务中心」跑一次「盘中任务」（建议 14:30），
-        这里就会给出两张当天的参考清单：全套条件达标的、以及仅乖离率符合的。</p></div></div>
+      <p class="empty-note">点上面「⟳ 实时更新」马上扫一次，或到「任务中心 → 盘中任务」执行
+        （建议 14:30）。这里会给出两张当天的参考清单：全套条件达标的、以及仅乖离率符合的。</p></div></div>
   </div>
 
   </section>
@@ -832,8 +900,15 @@ details.hform-w[open]>summary::before{content:"－ "}
     <h2>任务中心 <span class="tag">什么时候跑，由你决定</span></h2>
     <div class="banner info show" style="margin-bottom:var(--s-4)">
       ★ 三个任务默认<b>全都是「不定时」</b>的。你可以随时点「立即执行」马上跑一次，
-      或者打开「定时执行」开关，让它每天到点自动跑。<b>网站本身绝不会自己偷偷定时。</b>
+      或者打开「定时执行」开关，让它每天到点自动跑。<b>网站本身绝不会自己偷偷定时。</b><br>
+      要更新数据，就进 <b>🌙 盘后任务</b> 点「立即执行」—— 全市场下载都在那里。
     </div>
+
+    <!-- ★ 三个任务做成标签栏，一次只展开一个。
+         原来是三张卡片竖排，每张都带说明 + 定时设置 + 进度 + 历史记录 + 结果明细，
+         全摊开要滚三屏多，想找「盘后任务」得先越过另外两个任务的整套设置。 -->
+    <div class="subtabs tasktabs" id="taskTabs" role="tablist" aria-label="任务切换"></div>
+
     <div id="taskList"><div class="empty"><span class="empty-mark">⋯</span>
       <p class="empty-title">正在读取任务状态</p></div></div>
   </div>
@@ -905,6 +980,25 @@ const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-redu
 // ★ 必须声明在 applyTheme 之前：applyTheme 会在脚本首次执行时就被调用，
 //   而它内部要读 LAST_HIST 决定是否重画曲线。用 let 声明在后面会触发暂时性死区报错。
 let LAST_HIST=null, LAST_TH=50;
+
+/* 「盘中参考」当前选中的子标签。
+   ★ 必须记住：实时更新每 60 秒重绘一次卡片，如果每次都按「有内容的那个」
+     重新决定默认页，用户正盯着「仅乖离率」看，一刷新就被弹回「达标清单」。 */
+let INTRA_SUB=null;
+/* 上一次盘中扫描是否已经是收盘口径（时间进度 100%）。
+   实时更新据此自动收手 —— 15:00 之后再按秒刷不会有新信息，只会白耗网络。 */
+let LIVE_CLOSED=false;
+
+/* 实时更新的全部状态。
+   ★ 声明放在这么靠前，是因为 navIntra()（菜单角标）要读它 ——
+     而 navIntra 可能在脚本首次执行期间就被走到，声明晚了会撞上暂时性死区。
+   字段：on 开关 / iv 间隔秒 / busy 正在刷新 / n 本次已刷新次数 /
+        fail 连续失败 / denied 连续被别的任务占用 / cd 倒计时秒 /
+        tick 秒表 / lastAt 上次完成时刻 / prev 上次达标清单代码 /
+        why 停止原因 / diff 与上次的差异文案 / phase 当前阶段文案 */
+const LIVE={on:false, iv:60, busy:false, n:0, fail:0, denied:0, cd:0,
+            tick:null, lastAt:'', prev:null, why:'', diff:'', phase:''};
+const LIVE_MAX_FAIL=3, LIVE_MAX_DENY=5;
 
 /* ============================================================================
    分区导航（左菜单 · 右显示区）
@@ -997,6 +1091,18 @@ function setNav(pane, sub, dot, dotCls){
   if(d) d.className = dot ? ('nav-dot on'+(dotCls?' '+dotCls:'')) : 'nav-dot';
 }
 
+/* 「盘中参考」的菜单角标。
+   ★ 单独包一层是因为实时更新会把角标改写一版（加「· 实时」），
+     而 loadIntraday 也会写一版（数量 + 红点）。两边各写各的，
+     后跑的那个就会把另一个冲掉 —— 例如刷新一次，「实时」两个字就没了。
+     所以角标内容统一记在这里，谁要改都走这个函数重新合成。 */
+let NAV_INTRA={sub:'', dot:false, cls:''};
+function navIntra(sub, dot, cls){
+  if(sub!=null) NAV_INTRA={sub:sub, dot:!!dot, cls:cls||''};
+  setNav('intra', NAV_INTRA.sub + (LIVE && LIVE.on ? ' · 实时' : ''),
+         NAV_INTRA.dot || (LIVE && LIVE.on), NAV_INTRA.cls);
+}
+
 /* 子标签：分区内部的分段开关。
    盘中参考一页要装两张清单 + 一段口径说明，全摊开会变成新的长页面，
    所以用子标签把「达标清单 / 仅乖离率 / 口径说明」分成三段。
@@ -1007,6 +1113,9 @@ function showSub(boxId, sub){
   box.querySelectorAll('.subtabs .subtab').forEach(b=>
     b.setAttribute('aria-selected', String(b.dataset.sub===sub)));
   box.querySelectorAll('.subpane').forEach(p=>{ p.hidden = (p.dataset.sub!==sub); });
+  /* ★ 记住用户选的是哪一段：实时更新每 60 秒重绘这张卡片，
+     不记的话每次刷新都会跳回「达标清单」。 */
+  if(boxId==='intraBox') INTRA_SUB=sub;
 }
 
 /* 顶栏高度是 sticky 的基准（窄屏菜单条、宽屏侧栏都贴在它下面）。
@@ -1096,11 +1205,10 @@ function applyStatus(s){
   const stale = !!s.stale;
   const warn = (stale && s.expected_date)
     ? `<span class="warnmark show">⚠ 数据源尚未发布 ${esc(s.expected_date)} 行情</span>` : "";
-  $("hRight").innerHTML = (s.last_date
-    ? `数据日期 <b>${esc(s.last_date)}</b><br>更新于 ${esc((s.updated_at||"").replace("T"," "))}`
-    : "尚无数据") + warn;
-  // ★ 按钮跟着「真实的运行态」走：不论是本页点的、控制台点的，还是定时器触发的
-  setUpdateBtn(!!s.updating || (s.running_tasks||[]).length>0);
+  /* ★ 顶栏平时是空的，只在「数据源还没发布当日行情」时才冒出一句话。
+     数据日期/更新时间不在这里重复 —— 「今日结论」页有完整两行。 */
+  const meta = $("hRight");
+  if(meta) meta.innerHTML = warn;
   /* ★「数据源发布 / 未发布」这个状态本身也要驱动界面。
      冷启动时后端还在后台探测 expected_date，第一轮 /api/status 拿不到，
      所以「未发布」提示常常是在随后某一轮轮询才浮现的 —— 那时卡片里的说明块
@@ -1119,13 +1227,6 @@ async function refreshDataWarn(){
       $("tagDate").textContent = t.stale ? (t.date+" · 数据源未更新") : t.date;
     }else{ setDataWarn(null); }
   }catch(e){}
-}
-
-function setUpdateBtn(busy){
-  const b=$("btnUpdate"); if(!b) return;
-  if(b.disabled!==busy) b.disabled=busy;
-  const txt = busy ? "更新中…" : "更新数据";
-  if(b.textContent!==txt) b.textContent=txt;
 }
 
 /* ============ 常驻「版本」监视器 ============
@@ -1170,7 +1271,7 @@ async function loadToday(){
   if(!t.ok){
     // ★ 无数据时必须把首屏从「加载中…」改成一个明确的说法，
     //   否则页面会一直停在 loading 状态，用户以为程序没跑起来。
-    showBanner(t.msg||"尚无数据，请点右上角「更新数据」。","err");
+    showBanner(t.msg||"尚无数据，请到「任务中心 → 盘后任务」点一次「立即执行」。","err");
     const act=$("actionText");
     act.textContent="还没有数据 —— 先跑一次盘后任务";
     act.className="conclusion act-no";
@@ -1313,10 +1414,15 @@ async function loadIntraday(){
          盘中任务只要几秒，直接把按钮放在缺东西的这个地方，少两步操作。 */
       '<button class="btn btn-primary" onclick="runTask(\'intraday\')">▶ 立即执行盘中任务</button>'+
       '</div>';
-    setNav('intra','待跑',false);
+    navIntra('待跑', false);
+    LIVE_CLOSED=false;
     return;
   }
   const prog = d.progress||0;
+  /* ★ 收盘口径要记下来给实时更新用：15:00 之后快照就是收盘价，
+     再按秒刷不会有新信息。用户 14:30 开了自动刷新忘了关，
+     总不能让它一路跑到晚上。 */
+  LIVE_CLOSED = (d.session==='closed') || prog>=0.999;
   /* ★ 两把尺子：
        gate  = 全市场广度是否达标（择时总开关，与六年回测同一口径）
        gateM = 主板口径是否达标（用户实际能买的池子，门槛 30）
@@ -1358,7 +1464,8 @@ async function loadIntraday(){
      用三个子标签分开，一屏只呈现一件事；标签上直接带数量，
      不点进去也知道各自有多少。默认停在「有内容的」那一页。 */
   const hitN=(d.candidates||[]).length;
-  const sub0 = hitN ? 'hit' : (nearN ? 'near' : 'hit');
+  /* 默认停在「有内容的」那一段；但用户手动选过就听用户的（INTRA_SUB）。 */
+  const sub0 = INTRA_SUB || (hitN ? 'hit' : (nearN ? 'near' : 'hit'));
   h+='<div class="subtabs" role="tablist" aria-label="盘中参考视图">'+
      subTab('hit', '达标清单', hitN, sub0==='hit')+
      subTab('near','仅乖离率', nearN, sub0==='near')+
@@ -1393,16 +1500,216 @@ async function loadIntraday(){
      '盘中数据是推演，最终以收盘后的「盘后任务」为准；本页不构成投资建议。</p>'+
      '</div>';
 
+  /* ★ 整块替换 innerHTML 会让页面滚回顶部（内容高度一变就跳）。
+     实时更新每 60 秒重绘一次，用户在往下看清单时被反复弹回顶端会很难受。
+     只有「已经渲染过一次」才恢复 —— 首次渲染要保留浏览器的锚点定位。 */
+  const sy = window.scrollY;
+  const again = box.dataset.rendered === '1';
   box.innerHTML=h;
+  box.dataset.rendered='1';
+  if(again && sy>0 && window.scrollY!==sy) window.scrollTo(0, sy);
+
+  /* 与上一次实时刷新的达标清单比一比。
+     ★ 实时更新最实际的价值就是「刚才没有、现在有了」——
+       没有这个提示，用户盯着两张几乎一样的表，根本看不出变了什么。 */
+  if(LIVE.on){
+    const now=(d.candidates||[]).map(x=>String(x.code));
+    if(LIVE.prev){
+      const A=new Set(LIVE.prev), B=new Set(now);
+      const add=now.filter(c=>!A.has(c)).length;
+      const del=LIVE.prev.filter(c=>!B.has(c)).length;
+      LIVE.diff = (add||del)
+        ? '较上次 <b>新增 '+add+'</b> / <b>移出 '+del+'</b>'
+        : '清单无变化';
+    }
+    LIVE.prev=now;
+    renderLive();
+  }else{
+    LIVE.prev=(d.candidates||[]).map(x=>String(x.code));
+  }
 
   /* 菜单角标：这一页最该知道的是「有没有可操作的票」。
      ★ 隔天的旧结果必须显式标出来 —— 把昨天的清单当成今天的参考是这里最
        危险的一种误读，得在菜单上就先拦住。 */
-  if(staleDay)      setNav('intra', '上次 '+(pool>0?pool:nearN)+' 只', true, 'warn');
-  else if(pool>0)   setNav('intra', pool+' 只', true, 'hot');
-  else if(nearN>0)  setNav('intra', nearN+' 只', true, '');
-  else              setNav('intra', '无', false);
+  if(staleDay)      navIntra('上次 '+(pool>0?pool:nearN)+' 只', true, 'warn');
+  else if(pool>0)   navIntra(pool+' 只', true, 'hot');
+  else if(nearN>0)  navIntra(nearN+' 只', true, '');
+  else              navIntra('无', false);
 }
+
+/* ============================================================================
+   盘中参考 · 实时更新
+   ----------------------------------------------------------------------------
+   14:30 那一次扫描只反映 14:30 的行情。真正盯盘的人需要的是「它现在是什么样」，
+   所以这里按用户选定的间隔自动重跑扫描，倒计时、上次刷新的时刻、
+   以及和上一次相比清单变了什么，都摆在同一条上。
+
+   ★ 为什么不复用「盘中任务」：任务执行会往 task_runs 写一条 7~9 KB 的完整结果
+     并进入「历史执行记录」。实时刷新每 30~60 秒一次，半小时就是 30 条 ——
+     一年几十 MB 纯噪声，还会把真正的手动执行记录挤出列表（列表只留最近 20 条）。
+     所以走 POST /api/intraday/refresh 这条轻量通道：只覆盖缓存，不落任务记录。
+
+   ★ 三条自动收手的护栏（缺一条，用户中午点一下就能跑到晚上）：
+     ① 收盘（时间进度 100%）—— 快照已经等于收盘价，再刷不会有新信息
+     ② 页面切到后台 —— 先暂停，切回来立刻补一次
+     ③ 连续失败 / 连续被别的任务占用 —— 说明现在刷了也没用，别硬撞
+
+   ★ 刷新期间锁住间隔选择、只留「停止更新」可点。否则「改完间隔到底下一次
+     什么时候生效」是个说不清的中间态。停止按钮全程可点，随时能收手。
+   ========================================================================== */
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+
+function liveEls(){ return {b:$('btnLive'), s:$('liveInt'), st:$('liveSt'),
+                            bar:$('liveBar'), lab:$('liveIntLab')}; }
+
+function liveSet(html, warn){
+  const st=$('liveSt'); if(!st) return;
+  if(st.dataset.h!==html){ st.dataset.h=html; st.innerHTML=html; }
+  st.classList.toggle('warn', !!warn);
+}
+
+/* 把当前状态画到控制条上。任何状态变化、每秒倒计时都调它。 */
+function renderLive(){
+  const e=liveEls(); if(!e.b) return;
+  e.bar.classList.toggle('on', LIVE.on);
+  e.b.className = 'btn btn-sm ' + (LIVE.on ? 'btn-stop' : 'btn-primary');
+  e.b.textContent = LIVE.on ? '■ 停止更新' : '⟳ 实时更新';
+  e.b.title = LIVE.on ? '停止自动刷新（当前这次扫描会跑完）'
+                      : '按选定的间隔自动重拉全市场实时快照';
+  /* ★ 运行中锁住间隔：把「改了到底什么时候生效」这个中间态直接消掉。 */
+  e.s.disabled = LIVE.on;
+  e.s.title = LIVE.on ? '实时更新中 —— 先点「停止更新」才能改间隔' : '';
+  if(e.lab) e.lab.classList.toggle('locked', LIVE.on);
+
+  if(!LIVE.on){
+    if(LIVE.why){ liveSet(LIVE.why, true); return; }
+    if(LIVE.n)  { liveSet('已停止 · 上次刷新 <b>'+esc(LIVE.lastAt||'—')+
+                          '</b> · 本次共刷新 <b>'+LIVE.n+'</b> 次'); return; }
+    liveSet('点「实时更新」后，页面会按上面的间隔自动重拉一次全市场实时快照。');
+    return;
+  }
+  if(LIVE.busy){
+    liveSet('<b>正在刷新…</b>' + (LIVE.phase ? ' '+esc(LIVE.phase) : '')); return;
+  }
+  if(document.hidden){
+    liveSet('⏸ <b>页面在后台，已暂停</b> —— 切回本页会自动继续并立刻刷一次。'); return;
+  }
+  /* 上一轮没刷成的原因要留在状态行里。
+     ★ 不放的话，用户只会看到倒计时归零又重置，却不知道这次根本没刷新 ——
+       「被盘后任务占用」会连续跳过 5 次才收手，那段时间界面看起来一切正常。 */
+  const note = (LIVE.denied || LIVE.fail)
+    ? ' · <b class="bad">' + esc(LIVE.phase ||
+        (LIVE.denied ? '有任务在跑，本次跳过' : '上次刷新失败，稍后会自动重试')) + '</b>'
+    : '';
+  liveSet('下次刷新 <b>'+(LIVE.cd>0?LIVE.cd:1)+' 秒</b>后 · 上次 '+
+          (LIVE.lastAt ? '<b>'+esc(LIVE.lastAt)+'</b>' : '—') +
+          (LIVE.n ? ' · 已刷新 <b>'+LIVE.n+'</b> 次' : '') +
+          (LIVE.diff ? ' · '+LIVE.diff : '') + note);
+}
+
+function toggleLive(){ if(LIVE.on) stopLive('已手动停止。'); else startLive(); }
+
+function startLive(){
+  if(LIVE.on) return;
+  const s=$('liveInt');
+  LIVE.iv = parseInt(s && s.value, 10) || 60;
+  LIVE.on=true; LIVE.n=0; LIVE.fail=0; LIVE.denied=0;
+  LIVE.why=''; LIVE.diff=''; LIVE.cd=0; LIVE.busy=false;
+  renderLive();
+  navIntra();                       // 菜单角标加「· 实时」
+  if(!LIVE.tick) LIVE.tick=setInterval(liveTick, 1000);
+  refreshLive();
+}
+
+function stopLive(why){
+  /* ★ 不动 LIVE.busy：它只由 refreshLive 自己管。
+     用户可能在扫描进行到一半时按停止 —— 那一刻若把 busy 抹成 false，
+     紧接着重新开始就会再发一次请求，撞上服务端的「正在刷新中」被算成一次失败。
+     让在跑的那一次自然收尾，结果照样会刷到页面上（此时 LIVE.on 已是 false）。 */
+  LIVE.on=false; LIVE.why=why||'';
+  if(LIVE.tick){ clearInterval(LIVE.tick); LIVE.tick=null; }
+  renderLive();
+  navIntra();
+}
+
+function liveTick(){
+  if(!LIVE.on || LIVE.busy || document.hidden) return;
+  LIVE.cd--;
+  if(LIVE.cd<=0){ refreshLive(); return; }
+  renderLive();
+}
+
+async function refreshLive(){
+  if(LIVE.busy) return;
+  LIVE.busy=true;
+  LIVE.phase='正在拉取全市场实时快照…';
+  renderLive();
+
+  let started=false;
+  try{
+    const r=await jpost('/api/intraday/refresh');
+    if(r.ok){ started=true; LIVE.fail=0; LIVE.denied=0; }
+    else if(r.busy){ LIVE.denied++; LIVE.phase=r.msg||'有任务正在执行'; }
+    else { LIVE.fail++; LIVE.phase=r.msg||'刷新未启动'; }
+  }catch(e){ LIVE.fail++; LIVE.phase='请求失败（后端未响应）'; }
+
+  if(!started){
+    LIVE.busy=false;
+    LIVE.cd=LIVE.iv;                 // 不要连续硬撞，等下一个周期再试
+    if(LIVE.fail>=LIVE_MAX_FAIL){
+      stopLive('⚠ 连续 '+LIVE.fail+' 次刷新失败，已自动停止：'+esc(LIVE.phase)+
+               '。可以稍后手动再试，或等收盘跑「盘后任务」。'); return;
+    }
+    if(LIVE.denied>=LIVE_MAX_DENY){
+      stopLive('⚠ 已有任务在跑，实时更新已自动停止。'+
+               '等它跑完再点「实时更新」即可。'); return;
+    }
+    renderLive();
+    return;
+  }
+
+  /* 轮询服务端状态，直到这次扫描结束（正常 3~5 秒，网络差时更久）。 */
+  for(let i=0;i<420;i++){
+    await sleepMs(900);
+    let st;
+    try{ st=await jget('/api/intraday/refresh'); }catch(e){ continue; }
+    if(st.running){ LIVE.phase=st.msg||LIVE.phase; renderLive(); continue; }
+    LIVE.lastAt=(st.last_at||'').slice(11,19);
+    if(st.last_ok===false){ LIVE.fail++; LIVE.phase=st.last_err||'扫描未成功'; }
+    else { LIVE.fail=0; LIVE.n++; }
+    break;
+  }
+  LIVE.busy=false;
+
+  /* ★ 先把倒计时归位再落数据：loadIntraday 内部会顺带重绘控制条，
+     此刻 cd 若还是上一轮的 0，界面会闪一下「下次刷新 1 秒后」。 */
+  LIVE.cd=LIVE.iv;
+
+  // 结果落地：无论用户是否已经按了停止，都把最新一版刷到页面上
+  await loadIntraday();
+
+  if(!LIVE.on){ renderLive(); return; }
+  if(LIVE.fail>=LIVE_MAX_FAIL){
+    stopLive('⚠ 连续 '+LIVE.fail+' 次扫描失败，已自动停止：'+esc(LIVE.phase)+
+             '。可以稍后手动再试，或等收盘跑「盘后任务」。'); return;
+  }
+  /* ★ 收盘自动收手：快照已经等于收盘价，再按秒刷不会有新信息。 */
+  if(LIVE_CLOSED){
+    stopLive('已收盘（快照＝收盘价），实时更新已自动停止。'+
+             '要拿到最终定论，跑一次「任务中心 → 盘后任务」。'); return;
+  }
+  renderLive();
+}
+
+/* 页面切到后台先暂停：没人看的时候每秒拉一次全市场快照纯属浪费；
+   切回来立刻补一次，不会让用户对着旧数字做判断。 */
+document.addEventListener('visibilitychange', ()=>{
+  if(!LIVE.on) return;
+  if(document.hidden){ renderLive(); return; }
+  LIVE.cd=LIVE.iv;
+  renderLive();
+  refreshLive();
+});
 
 /* 页内子标签的按钮。cnt 为 null 时不显示数量胶囊。 */
 function subTab(key, text, cnt, on){
@@ -1607,17 +1914,6 @@ async function delHolding(id){
   if(!confirm("确定删除这条持仓记录？")) return;
   await jpost("/api/holdings/"+id,null,"DELETE"); loadHoldings();
 }
-async function triggerUpdate(){
-  setUpdateBtn(true);
-  showBanner("已开始更新数据，全市场约需 15–25 分钟。跑完本页会自动刷新，也可以关掉页面稍后再来。","info");
-  let r;
-  try{ r=await jpost("/api/update"); }
-  catch(e){ r={ok:false, msg:"请求失败，请确认「控制台」里工具网站还在运行中。"}; }
-  if(!r.ok){ setUpdateBtn(false); showBanner(r.msg||"无法开始更新。","err"); }
-  // ★ 不再需要自己的轮询：常驻的 startStatusWatch() 会盯住 data_version，
-  //   数据一写完就自动刷新四张卡片；按钮的「更新中…」也由它按真实运行态收回。
-}
-
 /* ============ 任务中心 ============ */
 function esc(s){ return String(s==null?"":s)
   .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
@@ -1679,77 +1975,154 @@ function renderBlocks(blocks){
   return h;
 }
 
-function renderTasks(data){
-  const list=data.tasks||[], busy=list.some(t=>t.running);
-  let h='';
-  for(const t of list){
-    const running=t.running, last=t.last_run, days=(t.days||'1,2,3,4,5').split(',');
-    let dayBox='';
-    for(const k of ['1','2','3','4','5','6','7'])
-      dayBox+='<label><input type="checkbox" data-day="'+k+'" '+(days.includes(k)?'checked':'')+'>'+DAYN[k]+'</label>';
+/* ★ 三个任务做成标签栏，一次只展开一个。
+   原来是三张卡片竖排，每张都带「说明 + 定时设置 + 进度 + 历史记录 + 结果明细」，
+   全摊开要滚三屏多 —— 想找「盘后任务」得先越过另外两个任务的整套设置。
+   标签上直接带状态胶囊（未开启 / 每天 HH:MM / 执行中 xx%），
+   不点进去也知道另外两个任务现在是什么情况。 */
+const TASK_TAB_KEY='bia_task_tab';
+let TASK_DATA=null, TASK_TAB=null;
+const TASK_UI={more:{}, hist:{}};   // 「说明」与「历史记录」的展开状态，切页要保留
+let RES_CACHE={}, HIST_CACHE={};    // 分别按 run id / 任务 key 缓存，切来切去不重复请求
 
-    let lastTxt='<span class="mini">从未执行过</span>';
-    if(last){
-      const cls=last.status==='ok'?'st-ok':(last.status==='fail'?'st-fail':'st-running');
-      const nm=last.status==='ok'?'成功':(last.status==='fail'?'失败':'执行中');
-      lastTxt='<span class="mini">上次执行 '+
-        esc((last.finished_at||last.started_at||'').replace('T',' '))+
-        ' <span class="'+cls+'">['+nm+']</span> '+
-        (last.trigger_by==='schedule'?'（定时触发）':'（手动触发）')+'</span><br>'+
-        '<span>'+esc(last.title||'')+'</span>';
-    }
-    const pct = (t.progress&&t.progress.total>0)
-      ? Math.round(t.progress.done/t.progress.total*100) : (running?3:0);
-
-    h+='<div class="task '+(running?'running':'')+'" data-key="'+t.key+'">'+
-       '<div class="task-head"><div style="flex:1;min-width:240px">'+
-         '<div class="task-title"><span class="ico" aria-hidden="true">'+t.icon+'</span>'+esc(t.name)+
-           ' <span class="chip '+(t.enabled?'on':'off')+'">'+
-           (t.enabled?('定时 '+esc(t.at_time)):'未开启定时')+'</span></div>'+
-         '<div class="task-desc">'+esc(t.desc)+'</div>'+
-         '<div class="task-more" id="more-'+t.key+'">'+esc(t.long_desc||'')+'</div>'+
-       '</div>'+
-       '<button class="btn btn-sm btn-ghost" onclick="toggleMore(\''+t.key+'\')">说明</button></div>'+
-
-       '<div class="task-row">'+
-         '<button class="btn btn-sm btn-primary" onclick="runTask(\''+t.key+'\')" '+
-           ((running||busy)?'disabled':'')+'>▶ 立即执行</button>'+
-         '<label class="sw"><input type="checkbox" id="en-'+t.key+'" '+(t.enabled?'checked':'')+'> 定时执行</label>'+
-         '<input type="time" id="tm-'+t.key+'" value="'+esc(t.at_time)+'" aria-label="定时时间">'+
-         '<span class="mini">星期</span><div class="days">'+dayBox+'</div>'+
-         '<button class="btn btn-sm btn-ghost" onclick="saveSchedule(\''+t.key+'\')">保存定时</button>'+
-       '</div>'+
-
-       '<div class="task-prog '+(running?'show':'')+'" id="prog-'+t.key+'">'+
-         '<div class="pbar"><i id="bar-'+t.key+'" style="width:'+pct+'%"></i></div>'+
-         '<div class="pmsg" id="pmsg-'+t.key+'">'+esc(running?(t.phase||'执行中'):'')+'…</div>'+
-       '</div>'+
-       '<div class="task-last">'+lastTxt+'</div>'+
-       '<details class="hist" ontoggle="if(this.open) loadHist(\''+t.key+'\')">'+
-         '<summary>查看历史执行记录</summary>'+
-         '<div class="hist-body" id="histb-'+t.key+'"></div></details>'+
-       '<div id="res-'+t.key+'"></div>'+
-    '</div>';
+function taskStat(t){
+  if(t.running){
+    const p=(t.progress&&t.progress.total>0)
+      ? Math.round(t.progress.done/t.progress.total*100) : 0;
+    return {txt: p>0 ? p+'%' : '执行中', cls:'run'};
   }
-  $("taskList").innerHTML=h;
+  if(t.enabled) return {txt:'每天 '+t.at_time, cls:'on'};
+  return {txt:'未开启', cls:''};
+}
+
+function renderTaskTabs(){
+  const box=$('taskTabs'); if(!box || !TASK_DATA) return;
+  box.innerHTML=(TASK_DATA.tasks||[]).map(t=>{
+    const c=taskStat(t);
+    return '<button class="subtab" type="button" role="tab" data-task="'+t.key+'" '+
+      'aria-selected="'+(t.key===TASK_TAB)+'" onclick="showTaskTab(\''+t.key+'\')">'+
+      '<span aria-hidden="true">'+t.icon+'</span>'+esc(t.name.replace('任务',''))+
+      '<span class="cnt '+c.cls+'" id="tst-'+t.key+'">'+esc(c.txt)+'</span></button>';
+  }).join('');
+}
+
+function showTaskTab(key){
+  if(key===TASK_TAB) return;
+  TASK_TAB=key;
+  try{ localStorage.setItem(TASK_TAB_KEY, key); }catch(e){}
+  renderTaskTabs();
+  renderTaskCard();
+}
+
+function renderTasks(data){
+  TASK_DATA=data;
+  const list=data.tasks||[], keys=list.map(t=>t.key);
+  if(!TASK_TAB || keys.indexOf(TASK_TAB)<0){
+    let k=null;
+    try{ k=localStorage.getItem(TASK_TAB_KEY); }catch(e){}
+    if(!k || keys.indexOf(k)<0){
+      /* 首次进来优先展示「正在跑的那个」——用户多半就是为它来的；
+         都没在跑就落在第一个。★ 只在这一次自动选，之后不再跳 ——
+         否则用户正看着盘前，盘后一开始跑就被弹走。 */
+      const r=list.find(t=>t.running);
+      k=r ? r.key : keys[0];
+    }
+    TASK_TAB=k;
+  }
+  renderTaskTabs();
+  renderTaskCard();
 
   /* 菜单角标：任务中心最该知道的是「现在有没有在跑」。
-     盘后任务要跑 20 分钟，用户切到别的页时全靠这个角标知道它还在跑。 */
-  const runN=list.filter(t=>t.running).length;
-  if(runN) setNav('task','执行中',true,'');
-  else     setNav('task','',false);
-
-  // 异步补上「上次执行结果」
-  for(const t of list){
-    if(!t.last_run || t.last_run.status==='running') continue;
-    jget('/api/tasks/'+t.key+'/result/'+t.last_run.id).then(r=>{
-      const box=$('res-'+t.key); if(!box) return;
-      if(r.ok && r.result && r.result.blocks) box.innerHTML=renderBlocks(r.result.blocks);
-      else if(r.ok && r.run && r.run.detail)
-        box.innerHTML='<div class="blk"><div class="blk-txt">'+
-          richText(r.run.detail)+'</div></div>';
-    }).catch(()=>{});
+     盘后任务要跑 20 分钟，用户切到别的分区时全靠这个角标知道它还在跑。 */
+  const runT=list.find(t=>t.running);
+  if(runT){
+    const p=(runT.progress&&runT.progress.total>0)
+      ? Math.round(runT.progress.done/runT.progress.total*100) : 0;
+    setNav('task', p>0 ? p+'%' : '执行中', true, '');
+  }else{
+    setNav('task','',false);
   }
+}
+
+/* 只渲染当前选中的那个任务。
+   ★ 与「取 /api/tasks」解耦：切标签是纯本地重绘，不必再请求一次后端。 */
+function renderTaskCard(){
+  const list=(TASK_DATA&&TASK_DATA.tasks)||[];
+  const box=$('taskList'); if(!box) return;
+  const t=list.find(x=>x.key===TASK_TAB);
+  if(!t){ box.innerHTML=''; return; }
+  const running=t.running, busy=list.some(x=>x.running);
+  const days=(t.days||'1,2,3,4,5').split(',');
+  let dayBox='';
+  for(const k of ['1','2','3','4','5','6','7'])
+    dayBox+='<label><input type="checkbox" data-day="'+k+'" '+(days.includes(k)?'checked':'')+'>'+DAYN[k]+'</label>';
+
+  const last=t.last_run;
+  let lastTxt='<span class="mini">从未执行过</span>';
+  if(last){
+    const cls=last.status==='ok'?'st-ok':(last.status==='fail'?'st-fail':'st-running');
+    const nm=last.status==='ok'?'成功':(last.status==='fail'?'失败':'执行中');
+    const by={schedule:'（定时触发）',auto:'（实时更新）'}[last.trigger_by]||'（手动触发）';
+    lastTxt='<span class="mini">上次执行 '+
+      esc((last.finished_at||last.started_at||'').replace('T',' '))+
+      ' <span class="'+cls+'">['+nm+']</span> '+by+'</span><br>'+
+      '<span>'+esc(last.title||'')+'</span>';
+  }
+  const pct = (t.progress&&t.progress.total>0)
+    ? Math.round(t.progress.done/t.progress.total*100) : (running?3:0);
+
+  box.innerHTML='<div class="task '+(running?'running':'')+'" data-key="'+t.key+'">'+
+     '<div class="task-head"><div style="flex:1;min-width:240px">'+
+       '<div class="task-title"><span class="ico" aria-hidden="true">'+t.icon+'</span>'+esc(t.name)+
+         ' <span class="chip '+(t.enabled?'on':'off')+'">'+
+         (t.enabled?('定时 '+esc(t.at_time)):'未开启定时')+'</span></div>'+
+       '<div class="task-desc">'+esc(t.desc)+'</div>'+
+       '<div class="task-more'+(TASK_UI.more[t.key]?' show':'')+'" id="more-'+t.key+'">'+
+         esc(t.long_desc||'')+'</div>'+
+     '</div>'+
+     '<button class="btn btn-sm btn-ghost" onclick="toggleMore(\''+t.key+'\')">说明</button></div>'+
+
+     '<div class="task-row">'+
+       '<button class="btn btn-sm btn-primary" onclick="runTask(\''+t.key+'\')" '+
+         ((running||busy)?'disabled':'')+'>▶ 立即执行</button>'+
+       '<label class="sw"><input type="checkbox" id="en-'+t.key+'" '+(t.enabled?'checked':'')+'> 定时执行</label>'+
+       '<input type="time" id="tm-'+t.key+'" value="'+esc(t.at_time)+'" aria-label="定时时间">'+
+       '<span class="mini">星期</span><div class="days">'+dayBox+'</div>'+
+       '<button class="btn btn-sm btn-ghost" onclick="saveSchedule(\''+t.key+'\')">保存定时</button>'+
+     '</div>'+
+
+     '<div class="task-prog '+(running?'show':'')+'" id="prog-'+t.key+'">'+
+       '<div class="pbar"><i id="bar-'+t.key+'" style="width:'+pct+'%"></i></div>'+
+       '<div class="pmsg" id="pmsg-'+t.key+'">'+esc(running?(t.phase||'执行中'):'')+'…</div>'+
+     '</div>'+
+     '<div class="task-last">'+lastTxt+'</div>'+
+     '<details class="hist"'+(TASK_UI.hist[t.key]?' open':'')+
+       ' ontoggle="taskHistToggle(\''+t.key+'\',this.open)">'+
+       '<summary>查看历史执行记录</summary>'+
+       '<div class="hist-body" id="histb-'+t.key+'"></div></details>'+
+     '<div id="res-'+t.key+'"></div>'+
+  '</div>';
+
+  // 展开状态是重建 DOM 时补上去的，浏览器不会为它补发 toggle 事件 → 手动补一次
+  if(TASK_UI.hist[t.key]) loadHist(t.key);
+  loadTaskResult(t);
+}
+
+/* 上次执行结果。★ 按 run id 缓存：切来切去、每 8 秒的版本轮询都不必重复拉取。 */
+function loadTaskResult(t){
+  const box=$('res-'+t.key); if(!box) return;
+  const last=t.last_run;
+  if(!last || last.status==='running') return;
+  const rid=last.id;
+  if(RES_CACHE[rid]!==undefined){ box.innerHTML=RES_CACHE[rid]; return; }
+  jget('/api/tasks/'+t.key+'/result/'+rid).then(r=>{
+    let h='';
+    if(r.ok && r.result && r.result.blocks) h=renderBlocks(r.result.blocks);
+    else if(r.ok && r.run && r.run.detail)
+      h='<div class="blk"><div class="blk-txt">'+richText(r.run.detail)+'</div></div>';
+    RES_CACHE[rid]=h;
+    const b=$('res-'+t.key); if(b) b.innerHTML=h;
+  }).catch(()=>{});
 }
 
 async function loadTasks(){
@@ -1760,30 +2133,49 @@ async function loadTasks(){
     if((d.tasks||[]).some(t=>t.running)) startTaskPoll();
   }catch(e){}
 }
-function toggleMore(k){ const e=$('more-'+k); if(e) e.classList.toggle('show'); }
+
+function toggleMore(k){
+  TASK_UI.more[k]=!TASK_UI.more[k];
+  const e=$('more-'+k); if(e) e.classList.toggle('show', TASK_UI.more[k]);
+}
+
+function taskHistToggle(key, open){
+  TASK_UI.hist[key]=open;
+  if(open) loadHist(key);
+}
 
 async function loadHist(key){
-  const box=$('histb-'+key); if(!box||box.dataset.loaded) return;
+  const box=$('histb-'+key); if(!box) return;
+  if(HIST_CACHE[key]!==undefined){ box.innerHTML=HIST_CACHE[key]; return; }
   try{
     const d=await jget('/api/tasks/'+key+'/runs?limit=20');
-    if(!d.runs.length){ box.innerHTML='<span class="mini">还没有执行记录。</span>'; }
+    let h;
+    if(!d.runs.length){ h='<span class="mini">还没有执行记录。</span>'; }
     else{
-      box.innerHTML=d.runs.slice().reverse().map(r=>{
+      h=d.runs.slice().reverse().map(r=>{
         const nm=r.status==='ok'?'成功':(r.status==='fail'?'失败':'执行中');
         const cls=r.status==='ok'?'st-ok':(r.status==='fail'?'st-fail':'st-running');
+        const by={schedule:'定时',auto:'实时更新'}[r.trigger_by]||'手动';
         return '<div class="hist-item"><b>'+esc((r.started_at||'').replace('T',' '))+'</b> '+
-               '<span class="'+cls+'">['+nm+']</span> '+
-               (r.trigger_by==='schedule'?'定时':'手动')+'<br>'+esc(r.title||'')+'</div>';
+               '<span class="'+cls+'">['+nm+']</span> '+by+'<br>'+esc(r.title||'')+'</div>';
       }).join('');
     }
-    box.dataset.loaded='1';
+    HIST_CACHE[key]=h;
+    box.innerHTML=h;
   }catch(e){ box.innerHTML='<span class="mini">加载失败</span>'; }
 }
 
 async function runTask(key){
   const r=await jpost('/api/tasks/'+key+'/run');
   showBanner(r.msg||'', r.ok?'info':'err');
-  if(r.ok){ await loadTasks(); startTaskPoll(); }
+  if(r.ok){
+    /* 任务是从哪里被点起来的，任务中心就停在那一页。
+       否则用户在「盘中参考」点了「▶ 立即执行盘中任务」，切到任务中心
+       看到的却是盘前的设置，还得自己再找一次。 */
+    TASK_TAB=key;
+    try{ localStorage.setItem(TASK_TAB_KEY, key); }catch(e){}
+    await loadTasks(); startTaskPoll();
+  }
 }
 
 function startTaskPoll(){
@@ -1792,15 +2184,22 @@ function startTaskPoll(){
   TASK_POLL=setInterval(async()=>{
     let d;
     try{ d=await jget('/api/tasks'); }catch(e){ return; }
-    // 只更新进度条，避免整块重绘打断操作
+    /* 只更新进度条与标签胶囊，避免整块重绘打断操作。
+       ★ 标签胶囊三个都要更新（不只当前这一页的）：用户在「盘前」页时，
+         也得看得出盘后任务正在跑 —— 这正是分页栏最容易丢的信息。 */
     for(const t of d.tasks){
       const bar=$('bar-'+t.key), msg=$('pmsg-'+t.key), box=$('prog-'+t.key);
+      const chip=$('tst-'+t.key);
       if(box) box.classList.toggle('show', !!t.running);
       if(bar && t.running){
         bar.style.width=((t.progress&&t.progress.total>0)
           ? Math.round(t.progress.done/t.progress.total*100) : 5)+'%';
       }
       if(msg && t.running) msg.textContent=(t.phase||'执行中')+' · '+(t.progress&&t.progress.msg||'')+'…';
+      if(chip){
+        const c=taskStat(t);
+        if(chip.textContent!==c.txt){ chip.textContent=c.txt; chip.className='cnt '+c.cls; }
+      }
     }
     // 菜单角标同步进度：切到别的页也能一眼看到盘后任务跑到哪了
     const runT=d.tasks.find(t=>t.running);
@@ -1812,6 +2211,9 @@ function startTaskPoll(){
     if(!d.tasks.some(t=>t.running)){
       clearInterval(TASK_POLL); TASK_POLL=null;
       hideBanner();
+      /* 刚跑完，历史记录和上次结果都变了 —— 两个缓存必须清掉，
+         否则「查看历史执行记录」会一直显示跑之前的旧列表。 */
+      HIST_CACHE={}; RES_CACHE={};
       await loadTasks(); await loadAll();
       // 数据真的变了时，startStatusWatch() 会紧跟一条更具体的提示
       //（"数据已更新到 X"）；这里只是兜底确认，避免用户以为页面卡住了。
@@ -1851,7 +2253,7 @@ async function loadAll(){
   showPane(defaultPane(), {force:true, remember:false, syncHash:false});
 })();
 
-$("btnUpdate").onclick=triggerUpdate;
+renderLive();          // 实时更新控制条先落到「未开启」的初始状态
 $("btnAdd").onclick=addHolding;
 // ★ 用本地时间生成"今天"，不能用 toISOString()（那是 UTC，
 //   北京时间早上 8 点前会算出昨天的日期）

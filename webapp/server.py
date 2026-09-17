@@ -15,6 +15,9 @@
   GET    /api/status                数据新鲜度 + 服务状态
   GET    /api/today                 今日广度 + 候选股 + 该不该动手
   GET    /api/history?days=250      历史广度序列
+  GET    /api/intraday              最近一次盘中扫描结果（「盘中参考」卡片）
+  POST   /api/intraday/refresh      轻量重跑一次盘中扫描（不写任务记录，供实时更新）
+  GET    /api/intraday/refresh      实时刷新的运行态
   GET    /api/holdings              我的持仓（含实时盈亏 + 卖出提示）
   POST   /api/holdings              新增持仓
   POST   /api/holdings/<id>/close   平仓
@@ -23,6 +26,8 @@
   POST   /api/tasks/<key>/run       立即执行任务
   POST   /api/tasks/<key>/schedule  设置/取消定时（{enabled, at_time, days}）
   GET    /api/tasks/<key>/runs      执行历史（含结果明细）
+  GET    /api/tasks/<key>/result/<id>  某次执行的完整结果（分组块）
+  POST   /api/update                直接跑一次全量数据更新（控制台用）
 ================================================================================
 """
 from __future__ import annotations
@@ -270,6 +275,90 @@ def api_intraday():
     out = dict(got["payload"])
     out["created_at"] = got["created_at"]
     return jsonify(out)
+
+
+# ======================================================= 盘中参考 · 实时刷新
+"""
+★ 为什么不直接复用「盘中任务」：
+
+  任务执行会往 task_runs 写一条完整结果（实测 7~9 KB），并进入「历史执行记录」。
+  而实时刷新是每 30~60 秒一次的动作，14:30~15:00 半小时就是 30 条 —— 一年下来
+  几十 MB 的纯噪声，还会把真正的手动执行记录挤出历史列表（列表只留最近 20 条）。
+
+  它语义上也确实不是一次「任务执行」，只是「按最新行情再看一眼」。
+  所以走独立轻量通道：只跑扫描 + 覆盖 scan_cache，不落任务记录。
+
+  另外必须与任务执行互斥：盘后任务正在重写全市场 CSV，此刻读 CSV 可能读到
+  写了一半的文件；而且两边同时拉全市场快照也纯属浪费。
+"""
+_REFRESH = dict(running=False, msg="", n=0, last_at=None, last_ok=None,
+                last_err="", dur=0.0)
+_REFRESH_LOCK = threading.Lock()
+
+
+def _refresh_worker(data_date: str) -> None:
+    t0 = time.time()
+
+    def lg(s):
+        with _REFRESH_LOCK:
+            # 去掉日志前缀，这行要直接显示给用户看
+            _REFRESH["msg"] = str(s).replace("[盘中] ", "")
+
+    ok, err = False, ""
+    try:
+        scan = core.intraday_scan(data_date=data_date, log=lg)
+        if scan.get("ok"):
+            db.save_scan("intraday", scan)          # 页面「盘中参考」读这一份
+            ok = True
+        else:
+            err = str(scan.get("msg") or "扫描未成功")
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+    with _REFRESH_LOCK:
+        _REFRESH.update(running=False, msg="", last_ok=ok, last_err=err,
+                        last_at=datetime.now().isoformat(timespec="seconds"),
+                        dur=round(time.time() - t0, 1))
+        if ok:
+            _REFRESH["n"] += 1
+
+
+@app.post("/api/intraday/refresh")
+def api_intraday_refresh():
+    """按最新行情重跑一次盘中扫描（不写任务执行记录）。"""
+    with _REFRESH_LOCK:
+        if _REFRESH["running"]:
+            return jsonify(dict(ok=False, busy=True, msg="正在刷新中…"))
+        _REFRESH["running"] = True        # ★ 同一把锁内「检查 + 占位」，防并发重入
+    try:
+        busy = [k for k in tasks.TASK_KEYS if tasks.STATE[k]["running"]]
+        if not busy:
+            # 跨进程：控制台窗口可能正在跑任务，它的状态在另一个进程里
+            try:
+                busy = db.has_running_task()
+            except Exception:
+                busy = []
+        if busy:
+            with _REFRESH_LOCK:
+                _REFRESH["running"] = False
+            names = {"premarket": "盘前任务", "intraday": "盘中任务",
+                     "postmarket": "盘后任务"}
+            return jsonify(dict(ok=False, busy=True,
+                                msg=f"{'、'.join(names.get(k, k) for k in busy)}正在执行，等它跑完再刷新"))
+        d = db.get_daily() or {}
+        threading.Thread(target=_refresh_worker, args=(d.get("date", ""),),
+                         daemon=True).start()
+    except Exception:
+        with _REFRESH_LOCK:
+            _REFRESH["running"] = False    # 起线程失败要回滚，别把刷新永久锁死
+        raise
+    return jsonify(dict(ok=True, msg="已开始刷新"))
+
+
+@app.get("/api/intraday/refresh")
+def api_intraday_refresh_state():
+    """实时刷新的运行态（供页面倒计时/进度轮询）。"""
+    with _REFRESH_LOCK:
+        return jsonify(dict(ok=True, **_REFRESH))
 
 
 # ------------------------------------------------------------------ 持仓
