@@ -656,9 +656,14 @@ def run_task(key: str, trigger_by: str = "manual", log=None,
     except Exception:
         pass
 
-    run_id = db.start_task_run(key, trigger_by)
+    # ★★ run_id 必须在 try **内部**取：db.start_task_run 一旦抛异常
+    #    （库被别的进程锁住 / 磁盘满 / 表损坏），旧写法会让异常绕过 finally，
+    #    STATE[key]["running"] 永远停在 True —— 这个任务从此再也跑不起来，
+    #    只能重启服务。用户看到的就是"点了没反应、一直转圈"。
+    run_id = None
     t0 = time.time()
     try:
+        run_id = db.start_task_run(key, trigger_by)
         result = RUNNERS[key](log=log)
         title = result.get("headline", "执行完成")
         db.finish_task_run(run_id, "ok", title,
@@ -670,13 +675,14 @@ def run_task(key: str, trigger_by: str = "manual", log=None,
         tb = traceback.format_exc()
         log(f"[错误] {key} 执行失败：{e}")
         log(tb)
-        db.finish_task_run(run_id, "fail", f"执行失败：{e}", summary="", detail=tb)
+        if run_id:
+            db.finish_task_run(run_id, "fail", f"执行失败：{e}", summary="", detail=tb)
         result = dict(headline=f"执行失败：{e}", level="danger",
                       blocks=[dict(title="错误详情", kind="text", text=tb)],
                       detail=tb, status="fail")
     finally:
         with _LOCK:
-            STATE[key].update(running=False, phase="完成", msg="", 
+            STATE[key].update(running=False, phase="完成", msg="",
                               done=0, total=0)
     result["elapsed_sec"] = round(time.time() - t0, 1)
     result["run_id"] = run_id

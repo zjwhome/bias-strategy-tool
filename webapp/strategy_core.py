@@ -594,18 +594,6 @@ def latest_quote(code: str) -> dict | None:
         return None
 
 
-def latest_date_str() -> str:
-    """本地缓存中的最新交易日（字符串），从清单缓存快速推断"""
-    for f in glob.glob(os.path.join(DATA_DIR, "600000.csv")) or \
-             glob.glob(os.path.join(DATA_DIR, "*.csv"))[:1]:
-        try:
-            d = pd.read_csv(f, usecols=["date"])
-            return str(d["date"].max())
-        except Exception:
-            return ""
-    return ""
-
-
 def fetch_live_quote(code: str) -> dict | None:
     """拉取单只股票最新行情，**不写本地缓存**（供盘中任务使用）。"""
     return fetch_live_quotes([code]).get(str(code).zfill(6))
@@ -775,10 +763,14 @@ def time_progress(h: int | None = None, m: int | None = None) -> float:
 
 
 # ---- 盘中基准（每只股票「今日之前」的那部分日线）----
-# 字段：前 23 根收盘价之和（配今日实时价推 MA24）、前 5 日均量、5 日前收盘价、上市天数
+# 字段：前 23 根收盘价之和（配今日实时价推 MA24）、前 4/5 日成交量之和、5 日前收盘价、上市天数
 _BASE_CSV = os.path.join(DATA_DIR, "_intraday_base.csv")
 _BASE_META = os.path.join(DATA_DIR, "_intraday_base.json")
-_BASE_COLS = ["code", "name", "data_date", "n_prior", "sum23", "vol_ma5", "close5", "last_close"]
+_BASE_COLS = ["code", "name", "data_date", "n_prior", "sum23", "sum_v4", "sum_v5",
+              "close5", "last_close"]
+# ★ 缓存结构版本号。**改了 _BASE_COLS 就必须 +1**：否则旧缓存里没有新列，
+#   读进来全是 NaN，量比会静默变成 0（不报错、不崩溃，只是结果全错）。
+_BASE_SCHEMA = "v2"
 # 哨兵日期：当作「今天在很远的未来」→ 尾部每一根 K 线都算「今日之前」。
 # 用途见 intraday_base：让基准只随「数据内容」变化，从而跨天复用。
 _ALL_BARS = "9999-12-31"
@@ -852,27 +844,35 @@ def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | Non
         except Exception:
             continue
     prior = [x for x in recs if x[0] < today]
-    if len(prior) < 24:
+    # ★ 收盘口径 ma = rolling(24, min_periods=24)，今日有值只需「今日之前 ≥ 23 根」。
+    #   写成 ≥24 会多卡掉一整档股票，与盘后结果对不齐。
+    if len(prior) < CFG["bias_period"] - 1:
         return None
-    # 上市交易日数：尾部读不到总行数，默认用文件大小估算（每行约 89 字节）。
-    #   ★ 但「上市 ≥ 60 日」这条门槛正好卡在很小的数字上，估算误差会直接影响
-    #     判定。所以只要估算值接近门槛（<260 日），就把整个文件读一遍数准 ——
-    #     这类股票的 CSV 都很小，代价可以忽略。
-    est_rows = max(0, int((size - 46) / 89))
-    if est_rows < 260:
-        try:
-            with open(path, "rb") as f2:
-                n_exact = sum(1 for l in f2.read().decode("utf-8-sig", "replace").splitlines()
-                              if re.match(r"^\d{4}-\d{2}-\d{2}", l))
-            est_rows = max(0, n_exact - (len(recs) - len(prior)))
-        except Exception:
-            pass
+    # 上市交易日数：尾部读不到总行数，得整文件数一遍。
+    #   ⚠️ 旧写法先用「89 字节/行」估算、只在估算 <260 时才精算 —— 但老股票早年
+    #      价格位数少、行长只有 ~81 字节，实测系统性低估约 10%
+    #      （000006 估 7394、实际 8160；全市场 2486 只老股票中位低 1.7%、最大 11.5%）。
+    #   ★ 现在**无条件精算**：实测字节级 count(b"\n") 扫完 5017 个 CSV 约 4 秒
+    #     （旧的逐行正则要 15.5 秒），相对基准构建本身完全可以忽略，
+    #     换来的是上市天数永远精确 ——「上市 ≥60 日」这条门槛不再依赖任何估算。
+    est_rows = 0
+    try:
+        with open(path, "rb") as f2:
+            n_lines = f2.read().count(b"\n")
+        # 第 1 行是表头，其余每行一根 K 线（pandas 落盘保证末尾有换行）
+        est_rows = max(0, int(n_lines) - 1 - (len(recs) - len(prior)))
+    except Exception:
+        pass
     n_prior = max(len(prior), est_rows)
     cl = [x[1] for x in prior]
     vo = [x[2] for x in prior]
+    # ★★ sum_v4 / sum_v5 是"量"而不是"均量"：量比的分母窗口要和收盘口径对齐，
+    #    而收盘用的是 rolling(5)（**含当日**），当日那根在盘中只能用"预测量"代替，
+    #    所以必须留成"和"让推演阶段自己拼分母（详见 intraday_scan 的注释）。
     return dict(data_date=prior[-1][0], n_prior=int(n_prior),
                 sum23=round(float(sum(cl[-23:])), 4),
-                vol_ma5=round(float(np.mean(vo[-5:])), 2),
+                sum_v4=round(float(sum(vo[-4:])), 2),
+                sum_v5=round(float(sum(vo[-5:])), 2),
                 close5=round(float(cl[-5]), 4),
                 last_close=round(float(cl[-1]), 4))
 
@@ -900,16 +900,22 @@ def intraday_base(data_date: str = "", force: bool = False, log=None,
     day = scan_day or datetime.now().strftime("%Y-%m-%d")
     if include_all is None:            # None = 按扫描日自动判断；True/False = 强制
         include_all = day > (data_date or "")
-    key = f"{data_date or ''}|{'all' if include_all else day}"
+    key = f"{_BASE_SCHEMA}|{data_date or ''}|{'all' if include_all else day}"
     if not force and os.path.exists(_BASE_CSV) and os.path.exists(_BASE_META):
         try:
             with open(_BASE_META, encoding="utf-8") as f:
                 meta = json.load(f)
             if str(meta.get("cache_key") or "") == key:
                 df = pd.read_csv(_BASE_CSV, dtype={"code": str})
-                df["code"] = df["code"].str.zfill(6)
-                return {r["code"]: r for r in df.to_dict("records")}
-            log(f"[盘中] 基准缓存键 {meta.get('cache_key')} ≠ {key} → 重建")
+                # ★ 双保险：万一缓存文件被旧版本写过（列不全），宁可重建也不要带着 NaN 往下走
+                missing = [c for c in _BASE_COLS if c not in df.columns]
+                if missing:
+                    log(f"[盘中] 基准缓存缺列 {missing} → 重建")
+                else:
+                    df["code"] = df["code"].str.zfill(6)
+                    return {r["code"]: r for r in df.to_dict("records")}
+            else:
+                log(f"[盘中] 基准缓存键 {meta.get('cache_key')} ≠ {key} → 重建")
         except Exception as e:
             log(f"[盘中] 基准缓存不可用（{e}），改为重建")
 
@@ -921,13 +927,14 @@ def intraday_base(data_date: str = "", force: bool = False, log=None,
     # ★ 用哨兵当作「今天」→ 尾部所有 K 线都算「今日之前」。
     #   已验证与「扫描日 > 数据日期」时的现口径逐字段完全等价（600 只抽样零差异）。
     eff_today = _ALL_BARS if include_all else day
+    names = load_names()
     for f in files:
         code = os.path.basename(f)[:-4]
         if not code.isdigit():
             continue
         m = _metrics_from_tail(f, eff_today)
         if m:
-            out[code] = dict(code=code, name="", **m)
+            out[code] = dict(code=code, name=names.get(code, ""), **m)
     if out:
         save_intraday_base(list(out.values()), key)
     log(f"[盘中] 基准建立完成：{len(out)} 只，耗时 {time.time()-t0:.1f} 秒")
@@ -1106,8 +1113,10 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         price = float(q.get("close") or 0)
         if price <= 0:
             continue
+        # ★ 最少 K 线数：收盘口径 ma = rolling(24, min_periods=24)，今日有值需要
+        #   「今日之前 ≥ 23 根」。写成 ≥24 会多卡掉 1 根，与盘后结果对不齐。
         n_prior = int(b.get("n_prior") or 0)
-        if n_prior < 24:
+        if n_prior < CFG["bias_period"] - 1:
             continue
         ma24 = (float(b["sum23"]) + price) / 24.0
         if ma24 <= 0:
@@ -1117,16 +1126,35 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         if bd > base_date:
             base_date = bd
 
-        v5 = float(b.get("vol_ma5") or 0)
+        sum_v4 = float(b.get("sum_v4") or 0)
+        sum_v5 = float(b.get("sum_v5") or 0)
         vol_today = _shares_today(q)                            # ★ 已按板块修正单位
-        vol_ratio = (vol_today / prog) / v5 if v5 > 0 else None
+        est_vol = vol_today / prog                              # 今日全天预估成交量（股）
+        # ★★ 量比的分母必须和收盘/回测同尺，否则 14:30 推演和盘后结果对不上：
+        #     收盘口径 vol_ma5 = rolling(5).mean() 是**含当日**的（V[T-4..T] 五根），
+        #     回测脚本 backtest_bias_full.py 用的是同一写法。
+        #     旧实现拿「今日之前 5 根」当分母，窗口整整错开一天 ——
+        #     2026-09-17 全市场逐股比对：中位偏差 6.6%、最大 64.5%，
+        #     4557/4993 只偏差 >1%，1658 只 >10%。
+        #     所以这里把「今日预测量」补进分母：V5 = (前4日量 + 今日预测量) / 5。
+        v5 = (sum_v4 + est_vol) / 5.0
+        vol_ratio = est_vol / v5 if v5 > 0 else None
         vr_rt = float(q.get("vol_ratio_rt") or 0)
-        # ★ 自检：腾讯自己也算「量比」（同口径），两者应当接近。
-        #   若大面积对不上，说明单位或口径出了问题（历史上正是靠它抓到科创板 100 倍误差）。
-        if vol_ratio and vr_rt > 0 and prog >= 0.5:
-            cmp_n += 1
-            if abs(vol_ratio / vr_rt - 1) > 0.25:
-                cmp_bad += 1
+        # ★ 自检：腾讯量比 = (今日至今量 / 已开市分钟) ÷ (过去5日平均每分钟量)
+        #     ⇒ 反推「今日全天预测量」= 量比 × 过去5日均量（**不含当日**）。
+        #    拿它和我们自己的 est_vol 比，就能校验**单位**是否对了 ——
+        #    历史上正是靠这一比对抓到科创板被放大 100 倍的假阳性。
+        #    ⚠️ 千万不能拿 vol_ratio 直接比 vr_rt：两者分母窗口定义不同（含/不含当日），
+        #       放量越大差得越多（3 倍量时差约 29%），那样会全是误报。
+        #       所以比的是"量"，不是"比"。
+        #   ⚠️ est_vol == 0 要排除：停牌股当日无成交，拿 0 去比必然 100% 偏离，
+        #      那是"没得比"而不是"比错了"，混进来会污染自检的偏离率。
+        if vr_rt > 0 and sum_v5 > 0 and est_vol > 0 and prog >= 0.5:
+            est_implied = vr_rt * sum_v5 / 5.0
+            if est_implied > 0:
+                cmp_n += 1
+                if abs(est_vol / est_implied - 1) > 0.25:
+                    cmp_bad += 1
 
         bias = (price - ma24) / ma24 * 100
         if bias > CFG["bias_threshold"]:
@@ -1134,9 +1162,18 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         c5 = float(b.get("close5") or 0)
         chg5d = (price / c5 - 1) * 100 if c5 > 0 else None
         amount = float(q.get("amount_wan") or 0) * 1e4 / prog
-        bar_no = n_prior + 1
+        # ★ 上市交易日数：收盘口径是 cumcount()，即「今日之前有几根 K 线」，
+        #   回测脚本沿用同一定义。所以这里就等于 n_prior，**绝不能 +1** ——
+        #   加 1 会让「上市 ≥ 60 日」这条门槛整体宽松一天
+        #   （2026-09-17 逐股比对：33 只完整历史的小盘股全部错位 +1）。
+        bar_no = n_prior
 
-        nm = q.get("name") or b.get("name") or ""
+        # ★ 名称必须规整成字符串：缓存 CSV 里的空 name 读回来是**浮点 NaN**，
+        #   而 NaN 在 Python 里是「真值」，`q.get("name") or b.get("name")` 会选中它，
+        #   下面那句 `nm.upper()` 立刻抛 AttributeError，整次盘中扫描直接崩掉。
+        _qn, _bn = q.get("name"), b.get("name")
+        nm = (_qn.strip() if isinstance(_qn, str) else "") \
+            or (_bn.strip() if isinstance(_bn, str) else "")
         mb = is_main_board(code)
         rec = dict(code=code, name=nm, board=board_of(code), mb=int(mb),
                    close=round(price, 3),
