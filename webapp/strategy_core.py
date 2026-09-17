@@ -106,6 +106,33 @@ def load_config() -> dict:
 
 CFG = load_config()
 
+# ★ 配置热更新：CFG 是「导入时读一次」的模块级字典，一旦服务起来就被冻结。
+#   但用户改了 strategy_config.json 里的门槛/乖离率之后，网页上显示的却还是旧值，
+#   必须重启服务才生效 —— 这跟「改完刷新页面即生效」的约定不符（出场参数早就做到了）。
+#   这里提供 reload_config()，**原地更新**同一个字典对象，
+#   于是所有 `core.CFG[...]` / `CFG[...]` 的取值处都会立刻看到新值。
+_CFG_LOCK = threading.Lock()
+_CFG_AT = 0.0
+
+
+def reload_config(min_interval: float = 3.0) -> dict:
+    """重新读配置文件并原地刷新 CFG，返回 CFG。
+
+    min_interval：最小重读间隔（秒）。/api/status 每 8 秒被轮询一次，
+    有这道节流就不会每次都去碰磁盘。任务开始前也会调用它。
+    """
+    global _CFG_AT
+    now = time.time()
+    with _CFG_LOCK:
+        if now - _CFG_AT < min_interval:
+            return CFG
+        _CFG_AT = now
+        try:
+            CFG.update(load_config())          # ★ 原地更新，不换对象
+        except Exception as e:
+            print(f"[config] 热更新失败，继续用旧值：{e}")
+    return CFG
+
 
 # ------------------------------------------------------------------ 板块归属
 # ★ 用户明确要求：**只做沪深主板**，创业板 / 科创板 / 北交所一律不考虑。
@@ -118,13 +145,20 @@ MB_PREFIXES = ("600", "601", "603", "605",      # 沪市主板
 
 
 def board_of(code) -> str:
-    """股票代码 → 所属板块名称"""
+    """股票代码 → 所属板块名称
+
+    ⚠️ 302 这个号段容易被误判成主板，实测确认它属于**创业板**：
+       「中航成飞」原代码 300114（中航电测），2025-02-17 起改码为 302132，
+       公司公告明确依据《深圳证券交易所上市公司自律监管指引第 2 号
+       ——创业板上市公司规范运作》，即**上市板仍是创业板**，只是换了号。
+       所以 302 必须归到创业板，绝不能算进用户只做的主板。
+    """
     c = str(code).zfill(6)
     if c.startswith(("600", "601", "603", "605")):
         return "沪市主板"
     if c.startswith(("000", "001", "002", "003")):
         return "深市主板"
-    if c.startswith(("300", "301")):
+    if c.startswith(("300", "301", "302")):
         return "创业板"
     if c.startswith(("688", "689")):
         return "科创板"
@@ -135,6 +169,20 @@ def board_of(code) -> str:
 
 def is_main_board(code) -> bool:
     return str(code).zfill(6).startswith(MB_PREFIXES)
+
+
+def filter_main_board_rows(rows: list[dict]) -> list[dict]:
+    """从「候选股 / 清单行」里剔掉非沪深主板。配置关闭 main_board_only 时原样返回。
+
+    ★ 为什么读取层也要过滤一遍（写入层已经过滤了）：
+      库里 2026-09-16 之前写入的候选股是「限主板」规则生效之前产生的，
+      里面混着创业板股票（实测：300750 宁德时代、300227 光韵达、300274 阳光电源）。
+      只在写入层过滤，这些历史行会一直留在页面上，用户会以为工具没听他的要求。
+      读取时再拦一道，历史脏数据也就地消失了。
+    """
+    if not CFG.get("main_board_only", True):
+        return rows or []
+    return [r for r in (rows or []) if is_main_board(r.get("code"))]
 
 
 # ------------------------------------------------------------------ 工具
@@ -242,6 +290,60 @@ def load_names() -> dict:
     except Exception as e:
         print(f"[names] 名称映射获取失败：{e}")
         return {}
+
+
+# ------------------------------------------------------------------ 交易日历
+# ★ 为什么需要：内置调度器（server.py）只按「星期几」判断该不该触发。遇到法定
+#   节假日（春节、国庆…）照样会触发一次——盘后任务要白下载 20~25 分钟全市场数据。
+#   用交易日历挡掉这类空跑。
+#   设计原则：**拿不到就放行**。宁可多跑一次，也绝不能因为日历拉不到而漏跑。
+_TRADE_CAL = os.path.join(DATA_DIR, "_trade_calendar.json")
+_CAL_MEM: dict = {"dates": None}
+
+
+def trade_calendar(force: bool = False) -> set:
+    """沪深交易日集合（"YYYY-MM-DD"）。内存 + 磁盘两级缓存，失败返回空集合。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    mem = _CAL_MEM.get("dates")
+    if not force and mem and max(mem) >= today:
+        return mem
+
+    if not force:
+        try:
+            with open(_TRADE_CAL, encoding="utf-8") as f:
+                d = {str(x)[:10] for x in (json.load(f).get("dates") or [])}
+            if d and max(d) >= today:          # 已有日历覆盖到今天 → 直接用
+                _CAL_MEM["dates"] = d
+                return d
+        except Exception:
+            pass
+
+    try:
+        import akshare as ak
+        df = ak.tool_trade_date_hist_sina()
+        col = "trade_date" if "trade_date" in df.columns else df.columns[0]
+        d = {str(x)[:10] for x in df[col].tolist()}
+        if d:
+            _CAL_MEM["dates"] = d
+            try:
+                with open(_TRADE_CAL, "w", encoding="utf-8") as f:
+                    json.dump(dict(updated_at=datetime.now().isoformat(timespec="seconds"),
+                                   dates=sorted(d)), f)
+            except Exception:
+                pass
+            return d
+    except Exception as e:
+        print(f"[calendar] 交易日历获取失败：{type(e).__name__}: {e}")
+    return mem or set()
+
+
+def is_trade_day(date_str: str = "") -> bool | None:
+    """True=交易日 / False=非交易日 / **None=无法判断（调用方应放行）**。"""
+    ds = (date_str or datetime.now().strftime("%Y-%m-%d"))[:10]
+    cal = trade_calendar()
+    if not cal or max(cal) < ds:
+        return None
+    return ds in cal
 
 
 # ------------------------------------------------------------------ 数据获取

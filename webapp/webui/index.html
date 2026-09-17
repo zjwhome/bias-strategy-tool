@@ -500,7 +500,20 @@ footer b{color:var(--ink-2)}
 }
 /* 窄屏下把两张数据表改成卡片式，标签在左、数值在右；不隐藏任何字段 */
 @media (max-width:640px){
-  .tbl-scroll{overflow-x:visible}
+  /* ★ 只有「会被下面规则卡片化」的三类表格，才把滚动容器放开（overflow:visible）。
+     以前是一刀切 `.tbl-scroll{overflow-x:visible}`，于是没被卡片化的
+     「项目/数值」两列表（任务中心「今日盘中概览」）在窄屏下没有任何收缩余地，
+     直接把整页撑宽 —— 实测 390px 视口溢出 87px。
+     这里用 :has() 精确限定；浏览器不支持 :has() 时退化成「所有表格都能横滚」，
+     只是多一个滚动条，绝不会撑破页面。 */
+  .tbl-scroll{overflow-x:auto}
+  .tbl-scroll:has(> table.hold),
+  .tbl-scroll:has(> table.cand),
+  .tbl-scroll:has(> table.intra){overflow-x:visible}
+  /* 「项目/数值」表：td 默认 nowrap（见 §7），窄屏必须允许换行才缩得下去 */
+  table.kvt{table-layout:fixed;font-size:var(--t-sm)}
+  table.kvt th:first-child,table.kvt td:first-child{width:42%}
+  table.kvt th,table.kvt td{white-space:normal;overflow-wrap:anywhere}
   .tbl-hint{display:block}
   /* ★ 必须把 .wide 也列进来：table.intra.wide{min-width:860px} 的特异性
      (0,0,2,1) 高于 table.intra (0,0,1,1)，只写 table.intra 覆盖不掉，
@@ -593,9 +606,10 @@ footer b{color:var(--ink-2)}
         <div class="meta">
           <div class="kv">交易日：<b id="mDate">—</b></div>
           <div class="kv">更新时间：<b id="mUpd">—</b></div>
-          <div class="kv">仅乖离率 ≤ -15%：<b id="mBias">—</b> 只</div>
-          <div class="kv">全市场：<b id="mTotal">—</b> 只</div>
-          <div class="kv">其中沪深主板：<b id="mMain">—</b> 只</div>
+          <div class="kv">全市场股票：<b id="mTotal">—</b> 只</div>
+          <div class="kv">仅乖离率 ≤ -15%（全市场）：<b id="mBias">—</b> 只</div>
+          <div class="kv">沪深主板达标：<b id="mMain">—</b> 只</div>
+          <div class="kv">沪深主板仅乖离率：<b id="mBiasMain">—</b> 只</div>
         </div>
       </div>
     </div>
@@ -851,6 +865,10 @@ async function loadToday(){
   $("mTotal").textContent = fmt(t.stocks_total);
   const mMain=$("mMain");
   if(mMain) mMain.textContent = (t.breadth_main==null) ? "—" : fmt(t.breadth_main);
+  // ★ 主板口径的「仅乖离率」也要露出来：全市场 20 只 vs 主板 10 只，
+  //   只给全市场数字会让用户以为一半都不在主板上——其实他只能看主板那 10 只。
+  const mBiasMain=$("mBiasMain");
+  if(mBiasMain) mBiasMain.textContent = (t.bias_only_main==null) ? "—" : fmt(t.bias_only_main);
   const lg=$("lgTh"); if(lg) lg.textContent = t.threshold;
 
   // 候选股
@@ -960,7 +978,10 @@ async function loadIntraday(){
      却忽略了下面主板清单里已经躺着几十只。 */
   const gate = !!d.triggered, gateM = !!d.triggered_main;
   const pool = d.breadth||0, nearN = d.bias_only_total||0;
-  tag.textContent = (d.quote_date||"")+" "+(d.quote_time||"")+
+  /* ★ 时效：盘中结果只对「当天」有效。隔天再打开页面时，如果不说清楚，
+     用户会把昨天的清单当成今天的参考——这是最危险的一种误读。 */
+  const staleDay = !!d.quote_date && d.quote_date !== todayStr();
+  tag.textContent = (staleDay?"上次 ":"")+(d.quote_date||"")+" "+(d.quote_time||"")+
                     (d.session==="closed" ? " · 已收盘，等同收盘口径" : " · 盘中实时");
   let pcls="wait", ptxt="今日无信号 · 空仓等待";
   if(gate && pool>0){      pcls="act";   ptxt="★ 出手窗口 · 主板可选 "+pool+" 只"; }
@@ -969,7 +990,14 @@ async function loadIntraday(){
   else if(pool>0){         pcls="watch"; ptxt="主板有 "+pool+" 只达标 · 全市场未到门槛"; }
   else if(nearN>0){        pcls="watch"; ptxt="暂未达标 · 仅乖离率到位 "+nearN+" 只"; }
 
-  let h='<div class="iph"><span class="pill '+pcls+'">'+esc(ptxt)+'</span>'+
+  let h='';
+  if(staleDay){
+    h+='<p class="intra-note" style="color:var(--warn)">⏳ <b>这不是今天的扫描</b> —— '+
+       '下面显示的是 '+esc(d.quote_date)+' 那一次「盘中任务」的结果，行情已经过时，'+
+       '只能当历史记录看。<br>要看今天的：到「任务中心」点一次「盘中任务」的「立即执行」'+
+       '（建议 14:30 左右，那时时间进度已过 87%，最接近收盘）。</p>';
+  }
+  h+='<div class="iph"><span class="pill '+pcls+'">'+esc(ptxt)+'</span>'+
     '<span class="mini">'+(prog>=0.999 ? "已收盘口径" : "时间进度 "+(prog*100).toFixed(0)+"%")+
     ' · 日线基准 '+(esc(d.base_date||"—"))+' · 扫描 '+fmt(d.scanned)+' 只</span></div>';
   h+='<div class="stats">'+
@@ -1172,6 +1200,21 @@ async function triggerUpdate(){
 /* ============ 任务中心 ============ */
 function esc(s){ return String(s==null?"":s)
   .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+/* 说明类文本里允许用 **加粗**（后端 blocks[].text 里写了 **…**）。
+   ★ 顺序必须是「先转义、再替换」——反过来的话用户可控内容就能注入 HTML。
+   ★ 以前没有这一步，任务中心会原样显示 "**达标清单**" 这种星号，
+     看起来像没做完的草稿。 */
+function richText(s){
+  return esc(s).replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>');
+}
+
+/* 本机"今天"（YYYY-MM-DD）。不能用 toISOString()——那是 UTC，
+   北京时间早上 8 点前会算成昨天。 */
+function todayStr(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
 const DAYN={'1':'一','2':'二','3':'三','4':'四','5':'五','6':'六','7':'日'};
 let TASK_POLL=null;
 
@@ -1182,9 +1225,10 @@ function renderBlocks(blocks){
     h+='<div class="blk"><div class="blk-t">'+esc(b.title||'')+'</div>';
     const rows=b.rows||[];
     if(b.kind==='text'){
-      h+='<div class="blk-txt">'+esc(b.text||'').replace(/\n/g,'<br>')+'</div>';
+      h+='<div class="blk-txt">'+richText(b.text||'')+'</div>';
     }else if(b.kind==='kv'){
-      h+='<div class="tbl-scroll"><table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>';
+      // class="kvt"：窄屏下需要它允许换行/收缩，否则会把页面撑宽（见 §15 媒体查询）
+      h+='<div class="tbl-scroll"><table class="kvt"><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>';
       for(const r of rows) h+='<tr><td>'+esc(r.k)+'</td><td class="num">'+esc(r.v)+'</td></tr>';
       h+='</tbody></table></div>';
     }else if(b.kind==='candidates'){
@@ -1276,7 +1320,7 @@ function renderTasks(data){
       if(r.ok && r.result && r.result.blocks) box.innerHTML=renderBlocks(r.result.blocks);
       else if(r.ok && r.run && r.run.detail)
         box.innerHTML='<div class="blk"><div class="blk-txt">'+
-          esc(r.run.detail).replace(/\n/g,'<br>')+'</div></div>';
+          richText(r.run.detail)+'</div></div>';
     }).catch(()=>{});
   }
 }

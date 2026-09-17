@@ -134,9 +134,17 @@ def static_files(fname):
     return send_from_directory(WEBUI, fname)
 
 
+@app.route("/favicon.ico")
+def favicon():
+    """浏览器默认会来要 /favicon.ico。以前落到通配路由上找不到文件 → 每条日志都
+    多一行 404。这里直接把控制台图标（app.ico）给它，日志干净、标签页也有图标。"""
+    return send_from_directory(HERE, "app.ico", mimetype="image/vnd.microsoft.icon")
+
+
 # ------------------------------------------------------------------ 状态
 @app.get("/api/status")
 def api_status():
+    core.reload_config()          # ★ 配置热更新：改了门槛不必重启服务（内部有 3 秒节流）
     d = db.get_daily()
     last_date = d["date"] if d else None
     running = [k for k in tasks.TASK_KEYS if tasks.STATE[k]["running"]]
@@ -176,10 +184,14 @@ def api_status():
 
 @app.get("/api/today")
 def api_today():
+    core.reload_config()
     d = db.get_daily()
     if not d:
         return jsonify(dict(ok=False, msg="尚无数据，请先到「任务中心」跑一次「盘后任务」。"))
-    cands = db.get_candidates(d["date"])
+    # ★ 读取时按主板过滤：库里 2026-09-16 之前写入的候选股是「只看主板」规则
+    #   生效前产生的，混着创业板（宁德时代/光韵达/阳光电源）。不回填历史数据，
+    #   而是在读取层拦掉，用户看到的就始终是「只看沪深主板」的名单。
+    cands = core.filter_main_board_rows(db.get_candidates(d["date"]))
     stale, exp, hint = staleness(d["date"])
     tm = core.CFG.get("breadth_threshold_main")
     return jsonify(dict(
@@ -426,15 +438,45 @@ GRACE_MIN = 60
 
 def _scheduler_loop():
     SCHEDULER_STATUS["alive"] = True
+    _skip_notice = {"date": ""}
     while True:
         try:
             SCHEDULER_STATUS["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             now = datetime.now()
             today = WEEK_MAP[now.weekday()]
+            ds = now.strftime("%Y-%m-%d")
             settings = db.get_task_settings()
+
+            # ★ 节假日保护：**工作日 ≠ 交易日**。法定节假日（春节/国庆…）里这个循环
+            #   照样会按「星期几」判定到期，然后触发一次盘后任务——白下载 20~25 分钟
+            #   全市场数据。先用交易日历挡掉，只在「今天确实有开启的定时任务」时才查，
+            #   避免用户从没开过定时也白白出网。is_trade_day() 返回 None（日历拉不到）
+            #   时**放行**：宁可多跑一次，也绝不能因为日历缺失而漏跑。
+            need_cal = False
+            for k in tasks.TASK_KEYS:
+                stk = settings.get(k) or {}
+                if stk.get("enabled") and \
+                        today in (stk.get("days") or "").replace(" ", "").split(","):
+                    need_cal = True
+                    break
+            on_trade_day = True
+            if need_cal:
+                try:
+                    on_trade_day = core.is_trade_day(ds) is not False
+                except Exception:
+                    on_trade_day = True
+                if not on_trade_day and _skip_notice["date"] != ds:
+                    _skip_notice["date"] = ds
+                    print(f"[调度器] {ds} 是非交易日（节假日），今天的定时任务全部跳过",
+                          flush=True)
+                elif on_trade_day:
+                    _skip_notice["date"] = ""
+
             for key in tasks.TASK_KEYS:
                 st = settings.get(key)
                 if not st or not st.get("enabled"):
+                    continue
+                if not on_trade_day:            # 节假日：不触发
                     continue
                 at = (st.get("at_time") or "").strip()
                 days = (st.get("days") or "").replace(" ", "")

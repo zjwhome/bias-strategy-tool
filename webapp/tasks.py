@@ -169,10 +169,25 @@ def evaluate_holding(h: dict, price: float | None = None,
     trail_trigger = 1 + ec["trailing_trigger_pct"] / 100.0
     trail_dd = 1 - ec["trailing_drawdown_pct"] / 100.0
 
-    stop = float(h.get("stop_price") or buy * stop_mult)
-    tp1 = float(h.get("tp1_price") or buy * tp1_mult)
-    tp2 = float(h.get("tp2_price") or buy * tp2_mult)
+    stop = round(buy * stop_mult, 3)
+    tp1 = round(buy * tp1_mult, 3)
+    tp2 = round(buy * tp2_mult, 3)
     peak = max(float(h.get("peak_price") or buy), float(price))
+
+    # ★ 出场价位以**配置**为唯一真相，不能优先用库里存的旧数值。
+    #   以前写的是 `h.get("stop_price") or buy*mult` —— 而每条持仓在登记时都已经
+    #   把当时的价位存进了库，于是 `or` 永远走左边，用户在配置里改 -6% → -8%
+    #   之后页面上还是老的 -6% 线，等于这个「改配置立即生效」的设计完全没生效。
+    #   这里改成：按配置算 → 与库里不一致就回写，让两边始终一致。
+    if h.get("id"):
+        try:
+            old = (round(float(h.get("stop_price") or 0), 3),
+                   round(float(h.get("tp1_price") or 0), 3),
+                   round(float(h.get("tp2_price") or 0), 3))
+            if old != (stop, tp1, tp2):
+                db.update_levels(h["id"], stop, tp1, tp2)
+        except Exception:
+            pass
 
     # 刷新历史最高价（让「移动止盈」能跨天工作）
     if peak > float(h.get("peak_price") or buy) and h.get("id"):
@@ -251,7 +266,12 @@ def _market_date() -> str:
 
 
 def _cand_rows(date: str) -> list[dict]:
-    return db.get_candidates(date)
+    """某日候选股。
+
+    ★ 读取时再按主板过滤一道：库里 2026-09-16 之前写入的行是「只看主板」规则
+      生效之前产生的，混着创业板股票。写入层过滤管不了历史数据，读取层兜住。
+    """
+    return core.filter_main_board_rows(db.get_candidates(date))
 
 
 # ================================================================== ① 盘前任务
@@ -349,13 +369,26 @@ def run_premarket(log=None) -> dict:
 def run_intraday(log=None) -> dict:
     """盘中（建议 14:30）：推演今日广度 + 两张参考清单 + 持仓实时体检。"""
     log = log or (lambda s: print(s, flush=True))
+    key = "intraday"
+
+    # ★ 进度回传：这个任务要跑 20~40 秒（建基准 ~3 秒 + 全市场快照 10~30 秒）。
+    #   不把日志同步进 STATE 的话，网页进度条会一直停在「启动 · 任务开始…」，
+    #   用户会以为卡死了。
+    def lg(s):
+        with _LOCK:
+            STATE[key]["msg"] = str(s)
+        log(s)
+
+    with _LOCK:
+        STATE[key]["phase"] = "盘中扫描"
+
     today = datetime.now().strftime("%Y-%m-%d")
     d = _latest_daily()
     market_date = d["date"] if d else ""
 
     # ---------------- ① 全市场盘中扫描 ----------------
-    log("[盘中] 开始全市场盘中扫描…")
-    scan = core.intraday_scan(data_date=market_date, log=log)
+    lg("[盘中] 开始全市场盘中扫描…")
+    scan = core.intraday_scan(data_date=market_date, log=lg)
     blocks = []
     if scan.get("ok"):
         try:
@@ -370,7 +403,9 @@ def run_intraday(log=None) -> dict:
     hold_block = None
     act = []
     if hs:
-        log(f"[盘中] 拉取 {len(hs)} 只持仓的实时行情…")
+        with _LOCK:
+            STATE[key].update(phase="持仓实时体检", msg=f"共 {len(hs)} 只")
+        lg(f"[盘中] 拉取 {len(hs)} 只持仓的实时行情…")
         codes = [str(h["code"]).zfill(6) for h in hs]
         rt = core.fetch_live_quotes(codes)
         quotes, fails, qdate, src = {}, [], "", ""
@@ -590,6 +625,13 @@ def run_task(key: str, trigger_by: str = "manual", log=None,
     if key not in RUNNERS:
         raise ValueError(f"未知任务：{key}")
     log = log or (lambda s: print(s, flush=True))
+
+    # ★ 任务开始前强制重读配置：用户刚在 strategy_config.json 里改过门槛/止损，
+    #   马上点「立即执行」，跑的就应该是新参数（而不是服务启动时的旧参数）。
+    try:
+        core.reload_config(0)
+    except Exception:
+        pass
 
     with _LOCK:
         if STATE[key]["running"] and not reserved:

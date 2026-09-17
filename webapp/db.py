@@ -248,6 +248,20 @@ def update_peak(hid: int, peak: float) -> None:
         conn.execute("UPDATE holdings SET peak_price=? WHERE id=?", (peak, hid))
 
 
+def update_levels(hid: int, stop: float, tp1: float, tp2: float) -> None:
+    """把三条出场价位写回持仓记录。
+
+    ★ 用途：出场参数以 strategy_config.json 为唯一真相，用户在配置里把止损从
+      -6% 改成 -8% 后，页面上的止损线要立刻跟着变。但库里存的还是老数值，
+      evaluate_holding 必须能把新算出来的价位回写，否则「改配置 → 刷新即生效」
+      只对没存过值的记录成立（实际每条持仓都存过值，等于完全失效）。
+    """
+    with connect() as conn:
+        conn.execute(
+            "UPDATE holdings SET stop_price=?, tp1_price=?, tp2_price=? WHERE id=?",
+            (stop, tp1, tp2, hid))
+
+
 def delete_holding(hid: int) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM holdings WHERE id=?", (hid,))
