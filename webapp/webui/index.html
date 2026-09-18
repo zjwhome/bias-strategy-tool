@@ -2588,11 +2588,24 @@ async function refreshHLive(){
     d=await loadHoldings(true);
   }catch(e){
     HLIVE.busy=false;
+    /* ★ 失败也必须把倒计时归位（对齐 refreshLive 的 !started 分支）。
+       否则 cd 停在 ≤0，hLiveTick 每秒都会看到 cd<=0 → 每秒重发一次请求，
+       网络一断就变成 1 秒一次的死循环重试。 */
+    HLIVE.cd=HLIVE.iv;
     HLIVE.fail++; HLIVE.phase='请求失败（后端未响应）';
     renderHLive();
     return;
   }
   HLIVE.busy=false;
+
+  /* ★★ 先把倒计时归位，再往下走（对齐 refreshLive 里 LIVE.cd=LIVE.iv 那一步）。
+     这一步是必须的，而且踩过：漏掉它时 cd 一旦归零就再也不会回正 ——
+     hLiveTick 每 tick(1s) 都命中 `cd<=0` → refreshHLive()，
+     后果是 ① 状态行永远显示「下次刷新 1 秒后」；② 间隔下拉
+     （30 秒 / 1 分钟 / 2 分钟 / 5 分钟）**完全失效**，实际按 1 秒一次狂刷；
+     ③ 已刷新次数飞快增长。真机验证（CDP）实测：cd 读数 -1→-4，
+     3 秒内 n 由 2 涨到 5 —— 就是这个原因。 */
+  HLIVE.cd=HLIVE.iv;
 
   /* 空仓或手动停止会让 loadHoldings 内部把 HLIVE.on 关掉，这里直接收手，
      不必再看 fail / closed（stopHLive 已经把 why 写好了）。 */
