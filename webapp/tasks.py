@@ -38,8 +38,10 @@ TASK_DEFS = {
         suggest="09:10",
         desc="开盘前 15 分钟跑。告诉你今天开盘「买什么、卖什么、还是什么都不做」。",
         long_desc=("读取最近一个已收盘交易日的广度和候选股，结合你的持仓体检结果，"
-                   "生成一张「今日操作清单」——需要卖出的持仓、需要买入的候选股，一条条列清楚。"
-                   "不需要重新下载数据，几秒就跑完。"),
+                   "生成今天的操作结论：买什么、卖什么、还是什么都不做。"
+                   "不需要重新下载数据，几秒就跑完。\n"
+                   "★ 持仓明细（价格、盈亏、止损止盈线）只在「我的持仓」页；"
+                   "本页**只在真有票需要动手时**留一行提醒并指路，不重复列持仓表。"),
     ),
     "intraday": dict(
         key="intraday", name="盘中任务", icon="⏱",
@@ -51,7 +53,8 @@ TASK_DEFS = {
                    "输出两张清单：① 全套条件达标（＝盘中口径的买入候选）；"
                    "② 只有乖离率到位、还差别的条件（附「差在哪一项」）。\n"
                    "★ 只统计沪深主板（其他板不考虑）。\n"
-                   "★ 若你持有股票，同时做一次持仓实时体检，预警止盈/止损。\n"
+                   "★ 若你持有股票，也会顺手做一次持仓体检；**明细在「我的持仓」页** ——"
+                   "本页只在真有票触发止损/止盈/到期、或行情没取全时，留一行提醒并指路。\n"
                    "★ 盘中口径是「推演」，不是收盘定论：越接近 14:55 越准；"
                    "最终仍以收盘后的「盘后任务」为准。"),
     ),
@@ -59,9 +62,10 @@ TASK_DEFS = {
         key="postmarket", name="盘后任务", icon="🌙",
         suggest="17:30",
         desc="收盘后跑。更新全市场数据，算出今日广度，决定「明天是否出手」。",
-        long_desc=("这是最核心的任务：拉取全市场 5017 只股票的最新日线（约 15~25 分钟），"
+        long_desc=("这是最核心的任务：拉取全市场约 5000 只股票的最新日线（约 15~25 分钟），"
                    "算出今日信号广度。广度 ≥ 门槛 → 输出明天的买入候选股；"
-                   "否则明确告诉你「明天不动手」。同时完成持仓体检和「明日操作计划」。\n"
+                   "否则明确告诉你「明天不动手」。同时完成持仓体检（**明细在「我的持仓」页**，"
+                   "本页只在真有票需要动手时留一行提醒）和「明日操作计划」。\n"
                    "★★ 建议 **17:30 之后**再跑（默认时间已按此设置）。\n"
                    "原因：新浪的「当日」日线要到当天傍晚才**分批**发布。实测规律很清楚 ——\n"
                    "     15:00~16:15 跑 → 拿到的全是**前一天**的数据；\n"
@@ -124,20 +128,55 @@ def exit_config() -> dict:
 
 # ------------------------------------------------------------------ 持仓体检
 def _holding_days(code: str, buy_date: str) -> int:
-    """买入至今经过的交易天数（按该股本地日线计数）"""
+    """买入至今经过的交易天数。
+
+    优先用 strategy_core 的交易日历精确计数 —— 即使该股票本地 CSV 因下载失败而停滞，
+    持有天数也会随真实交易日推进，避免「到期清仓」纪律因天数冻结而永远不触发。
+    拿不到交易日历（无网络 / 日历文件缺失）时退回「按本地 CSV 根数」的旧算法兜底，
+    且两种结果取较大值，保证不会比真实天数更小（宁可偏大也不把纪律拖失效）。
+    """
+    buy_date = str(buy_date or "")
+    csv_days = _holding_days_csv(code, buy_date)
+
+    try:
+        cal = core.trade_calendar()
+        if cal and buy_date:
+            m = max(cal)
+            today = datetime.now().strftime("%Y-%m-%d")
+            if m >= today:
+                # 日历覆盖到今天 → 可靠；end = 最新已发生的交易日（今天若是交易日则含今天）
+                past = [d for d in cal if d <= today]
+                end = max(past) if past else today
+                days = sum(1 for d in cal if buy_date < d <= end)
+                final = max(days, csv_days)      # 偏大不偏小
+                if final != csv_days:
+                    print(f"[持仓天数] {code} 交易日历={days}天 / CSV={csv_days}天 → 取较大值 {final}")
+                return final
+            # 日历陈旧（最新只到 {m}，未覆盖今天）→ 不可靠，退回 CSV 兜底
+            print(f"[持仓天数] {code} 交易日历仅到 {m}（未覆盖今天），"
+                  f"退回 CSV 算法={csv_days}天")
+            return csv_days
+        return csv_days
+    except Exception as e:
+        print(f"[持仓天数] {code} 日历计数异常：{e}（退回 CSV 算法={csv_days}天）")
+        return csv_days
+
+
+def _holding_days_csv(code: str, buy_date: str) -> int:
+    """原算法：按该股本地日线 CSV 的根数计数（兜底用）。"""
     p = os.path.join(core.DATA_DIR, f"{str(code).zfill(6)}.csv")
     if not os.path.exists(p):
         return 0
     try:
         d = pd.read_csv(p, usecols=["date"])
-        return int((d["date"] > str(buy_date)).sum())
+        return int((d["date"] > buy_date).sum())
     except Exception:
         return 0
 
 
 def evaluate_holding(h: dict, price: float | None = None,
                      quote_date: str = "", latest_market_date: str = "",
-                     intraday: bool = False) -> dict:
+                     intraday: bool = False, persist: bool = True) -> dict:
     """给一条持仓附加行情与卖出提示。
 
     price = None 时从本地缓存取最新收盘价；盘中任务传入实时价覆盖。
@@ -152,7 +191,8 @@ def evaluate_holding(h: dict, price: float | None = None,
         q = core.latest_quote(h["code"])
         if not q:
             out.update(last=None, pnl_pct=None, quote_date="", action="持有",
-                       level="warn", days_held=_holding_days(h["code"], h["buy_date"] or ""),
+                       level="warn", action_kind="stale",
+                       days_held=_holding_days(h["code"], h["buy_date"] or ""),
                        alerts=["未找到本地行情，请先跑一次盘后任务"])
             return out
         price, quote_date = q["close"], q["date"]
@@ -164,6 +204,7 @@ def evaluate_holding(h: dict, price: float | None = None,
     out["alerts"] = []
     out["action"] = "持有"
     out["level"] = "ok"
+    out["action_kind"] = "none"
 
     # ★ 阈值全部来自 strategy_config.json（改配置立即生效）
     stop_mult = 1 + ec["hard_stop_loss_pct"] / 100.0
@@ -175,6 +216,43 @@ def evaluate_holding(h: dict, price: float | None = None,
     stop = round(buy * stop_mult, 3)
     tp1 = round(buy * tp1_mult, 3)
     tp2 = round(buy * tp2_mult, 3)
+
+    # ★★ 行情新鲜度闸门（2026-09-18 真实事故后加，别再删）
+    #   兜底价可能是「买入日之前」或「比最新交易日还旧」的价格，两种都绝不能当现价用。
+    #   真实事故：用户当天买入 000048（买入价 18.05），兜底取到的是 09-17 昨收 19.43，
+    #   被 max 进 peak 并 db.update_peak **写库污染** → 移动止盈被错误武装 →
+    #   页面报出假的「★ 清仓（移动止盈回撤）」，会让人砍掉一只正在盈利的票。
+    #   同理若兜底价高于止盈线，会报出假的「卖出一半 / 全部清仓」。
+    #   两条判据各防一类：
+    #     ① quote_date < buy_date —— 防「买入日之前的价被当现价」（上面这起事故）
+    #     ② quote_date < 最新交易日 —— 防「停牌/长期没更新的票拿几个月前的价当现价」；
+    #        这类票的兜底日期仍晚于买入日，判据①根本拦不住。
+    #   quote_date 为空串（实时价常见）或对应参照为空时一律不算陈旧，避免误判。
+    #   命中即：不做出场判定、不写库、峰值退回到「库里已有值 / 买入价」。
+    buy_date = str(h.get("buy_date") or "")
+    stale = bool(quote_date) and (
+        (bool(buy_date) and str(quote_date) < buy_date)
+        or (bool(latest_market_date) and str(quote_date) < str(latest_market_date))
+    )
+    if stale:
+        why = (f"早于买入日 {buy_date}" if buy_date and str(quote_date) < buy_date
+               else "不是最新的行情")
+        out.update(
+            last=None,
+            pnl_pct=None,
+            action="持有",
+            level="warn",
+            action_kind="stale",
+            days_held=_holding_days(h["code"], buy_date),
+            alerts=[f"本地行情还停在 {quote_date}（{why}），暂无可用现价；"
+                    f"跑一次盘后任务或点「⟳ 刷新持仓」可拿到实时价"],
+            stop_price=round(stop, 3),
+            tp1_price=round(tp1, 3),
+            tp2_price=round(tp2, 3),
+            peak_price=round(max(float(h.get("peak_price") or buy), buy), 3),
+        )
+        return out
+
     peak = max(float(h.get("peak_price") or buy), float(price))
 
     # ★ 出场价位以**配置**为唯一真相，不能优先用库里存的旧数值。
@@ -182,7 +260,7 @@ def evaluate_holding(h: dict, price: float | None = None,
     #   把当时的价位存进了库，于是 `or` 永远走左边，用户在配置里改 -6% → -8%
     #   之后页面上还是老的 -6% 线，等于这个「改配置立即生效」的设计完全没生效。
     #   这里改成：按配置算 → 与库里不一致就回写，让两边始终一致。
-    if h.get("id"):
+    if h.get("id") and persist:
         try:
             old = (round(float(h.get("stop_price") or 0), 3),
                    round(float(h.get("tp1_price") or 0), 3),
@@ -193,7 +271,7 @@ def evaluate_holding(h: dict, price: float | None = None,
             pass
 
     # 刷新历史最高价（让「移动止盈」能跨天工作）
-    if peak > float(h.get("peak_price") or buy) and h.get("id"):
+    if peak > float(h.get("peak_price") or buy) and h.get("id") and persist:
         try:
             db.update_peak(h["id"], round(peak, 3))
         except Exception:
@@ -237,25 +315,57 @@ def evaluate_holding(h: dict, price: float | None = None,
         out["alerts"].append(f"行情为 {quote_date}，非最新")
         if out["level"] == "ok":
             out["level"] = "warn"
+
+    # ★ action_kind 显式标记（2026-09-18 T1 修复）：
+    #   "action" = 真触发了止损 / 止盈 / 到期，需要动手；
+    #   "none"   = 正常持有（含「行情非最新」等软提示，无动作）；
+    #   "stale"  = 行情陈旧 / 取不到价，无法判断（见上方 stale 分支，已标记）。
+    #   _need_action 只收 "action"，明确排除 "stale"，杜绝「假动作」头条。
+    if out["action"] != "持有":
+        out["action_kind"] = "action"
     return out
 
 
 def evaluate_holdings(quotes: dict | None = None, quote_date: str = "",
-                      latest_market_date: str = "", intraday: bool = False) -> list[dict]:
-    """体检全部在持持仓。quotes={code: price} 可覆盖最新价（盘中用）。"""
+                      latest_market_date: str = "", intraday: bool = False,
+                      persist: bool = True) -> list[dict]:
+    """体检全部在持持仓。quotes={code: price} 可覆盖最新价（盘中用）。
+
+    ★ persist（2026-09-18 审计新增，S2）：**只读的 GET 请求不该写库**。
+      `/api/holdings` 是 GET，但旧实现会顺路调 db.update_peak / db.update_levels，
+      也就是"看一眼持仓"这个动作会改数据库。多数时候无害（峰值本来就该更新），
+      但降级路径（拿不到实时价、退回本地收盘价）会**在有真实价之前就先把峰值
+      推上去** —— 这正是 09-18 那次假清仓的半个成因。
+      所以约定：**拿到真实实时价的那条路传 persist=True（合法峰值来源，必须写）；
+      降级/兜底那条路传 persist=False（只看不写，等真实价到了再落库）。**
+      默认 True 保持既有行为，所有老调用点不受影响。
+    """
     res = []
     for h in db.list_holdings("holding"):
         p = quotes.get(h["code"]) if quotes else None
         res.append(evaluate_holding(h, price=p, quote_date=quote_date,
                                     latest_market_date=latest_market_date,
-                                    intraday=intraday))
+                                    intraday=intraday, persist=persist))
     return res
 
 
 def _need_action(hs: list[dict]) -> list[dict]:
-    """筛出需要今天动手的持仓"""
-    return [h for h in hs if h["level"] in ("danger", "win", "warn")
-            or h["action"] != "持有"]
+    """筛出需要今天动手的持仓（真止损 / 真止盈 / 真到期）。
+
+    ★ 2026-09-18 T1 修复：明确排除 action_kind=="stale" 的持仓
+      （行情陈旧 / 取不到实时价，根本无法判断，绝不能当成「有动作要做」），
+      正常持有（含「行情非最新」等软提示）也不收。
+    兼容：调用方 / 测试桩若没带 action_kind 字段，退回旧判据（按 level / action）。
+    """
+    act = []
+    for h in hs:
+        ak = h.get("action_kind")
+        if ak is not None:
+            if ak == "action":
+                act.append(h)
+        elif h["level"] in ("danger", "win", "warn") or h["action"] != "持有":
+            act.append(h)
+    return act
 
 
 def _hold_hint_block(act: list[dict], intraday: bool = False,
@@ -349,7 +459,10 @@ def run_premarket(log=None) -> dict:
         headline = "今天开盘可以按计划买入昨日候选股。"
         level = "ok"
     else:
-        headline = "今天不买也不卖，继续空仓等待。"
+        # ★ 有持仓时不能说"空仓等待"（2026-09-18 审计）：用户手里明明拿着票，
+        #   界面却写"继续空仓"，属于"说的和实际不符"，最伤信任。
+        headline = ("今天不买也不卖：持仓继续拿着，不用操作。" if hs
+                    else "今天不买也不卖，继续空仓等待。")
         level = "neutral"
 
     # ---- 持仓：本页不再列出持仓表（明细只在「我的持仓」页）----
@@ -383,7 +496,10 @@ def run_premarket(log=None) -> dict:
             kind="text",
             text=(f"最近交易日 {d['date']} 的信号广度只有 {d['breadth']} 只，"
                   f"未达到出手门槛 {th} 只。\n"
-                  "★ 空仓等待本身就是这个策略的一部分——六年里只有 22 天达标。")))
+                  + ("★ 空仓等待本身就是这个策略的一部分——六年里只有 22 天达标。"
+                     if not hs else
+                     "★ 不新买，但手里的持仓按各自的止损 / 止盈线照常管，"
+                     "明细在「我的持仓」页。"))))
 
     # ---- 数据新鲜度 ----
     fresh = datetime.now().strftime("%Y-%m-%d")
@@ -451,7 +567,15 @@ def run_intraday(log=None) -> dict:
         quotes, fails, qdate, src = {}, [], "", ""
         for h in hs:
             q = rt.get(str(h["code"]).zfill(6))
-            if q and q.get("close"):
+            # ★ 停牌股：行情解析层对停牌的处理是「close 装昨收 + suspended=True」
+            #   （见 strategy_core 的 _parse_*）。它的 quote_date 就是今天，所以
+            #   evaluate_holding 里的陈旧价闸门永远拦不住它 —— 会把昨收当成实时价
+            #   写进持仓峰值，移动止盈又被错误武装。必须在这里就当「没取到实时价」，
+            #   走既有的 fails 通道点名，不新增提示机制。
+            if q and q.get("suspended"):
+                fails.append(h["code"])
+                log(f"    {h['code']} 停牌（无实时成交价），回退本地缓存")
+            elif q and q.get("close"):
                 quotes[h["code"]] = float(q["close"])
                 qdate = q.get("date") or qdate
                 src = q.get("source") or src
@@ -507,7 +631,7 @@ def run_intraday(log=None) -> dict:
         level = "warn"
     else:
         headline = (f"今日暂无达标个股（主板 0 只；仅乖离率到位 {near_n} 只，可观察）"
-                    if near_n else "今日暂无任何信号 —— 空仓等待")
+                    if near_n else "今日暂无任何信号。")
         level = "neutral"
     headline = warn_pre + headline
     # 有「止损级」动作才把整页级别拉到 danger；止盈/到期是好消息，
@@ -653,7 +777,7 @@ def run_postmarket(log=None, limit: int = 0, no_fetch: bool = False) -> dict:
         blocks.append(dict(
             title="明日怎么操作", kind="text",
             text=("1. 明天开盘后分 2~3 批买入这些股票，资金平均分配\n"
-                  f"2. 最多 {ec_.get('max_daily_signals', 10)} 只，单只不超过总资金的 1/10~1/5\n"
+                  f"2. 最多 {ec_['max_daily_signals']} 只，单只不超过总资金的 1/10~1/5\n"
                   "3. 买入后立刻到工具站「我的持仓」登记，页面会自动帮你盯止损止盈\n"
                   f"4. 止损线 = 买入价 × {1 + ec_['hard_stop_loss_pct'] / 100:.2f}"
                   f"（{ec_['hard_stop_loss_pct']:+.0f}%）；止盈 +{t1:.0f}% 卖一半、"
@@ -779,12 +903,25 @@ def run_task(key: str, trigger_by: str = "manual", log=None,
         import traceback
         tb = traceback.format_exc()
         log(f"[错误] {key} 执行失败：{e}")
-        log(tb)
+        log(tb)                       # ★ 完整堆栈只进日志，绝不进页面
+        # ★ 2026-09-18 T4 修复：给用户看的文案换成人话 + 明确下一步；
+        #   完整 traceback 只写日志（上面 log(tb)），不写进 blocks / 历史详情，
+        #   否则整段堆栈会被前端直接渲染到正文卡片上。
         if run_id:
-            db.finish_task_run(run_id, "fail", f"执行失败：{e}", summary="", detail=tb)
-        result = dict(headline=f"执行失败：{e}", level="danger",
-                      blocks=[dict(title="错误详情", kind="text", text=tb)],
-                      detail=tb, status="fail")
+            db.finish_task_run(run_id, "fail", "执行未成功，请稍后重试",
+                               summary="", detail="执行异常，详见服务端日志。")
+        result = dict(
+            headline=("这次没跑成。请等 5 分钟再点一次；如果一直失败，"
+                      "把「历史执行记录」里这次的编号发给开发者即可。"),
+            level="danger",
+            blocks=[dict(
+                title="怎么办", kind="text",
+                text=("这次任务没能正常完成，已记入「历史执行记录」。\n"
+                      "· 最常见原因：数据源暂时限流 / 网络抖动，稍等几分钟重试通常就好。\n"
+                      "· 请等 5 分钟后在页面上再点一次「立即执行」。\n"
+                      "· 如果连续失败，打开「历史执行记录」找到这次的编号，发给开发者排查。"))],
+            detail="执行未成功，已记录到「历史执行记录」。详细错误见服务端日志。",
+            status="fail")
     finally:
         with _LOCK:
             STATE[key].update(running=False, phase="完成", msg="",

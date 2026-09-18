@@ -471,38 +471,100 @@ def _hold_sig(rows: list[dict], ec: dict | None = None) -> str:
             f"{ec.get('max_hold_days')}")
 
 
+# ------------------------------------------------------------------ 时段判定
+# ★ 用**本机时钟**显式划分交易时段，而不是依赖 strategy_core.time_progress
+#   那种把 00:00–09:30、11:30–13:00（午休）都算作"交易中"的口径 —— 那样会让
+#   状态行在「半夜开着自动刷新」时从 00:00 一路刷到 15:00，并在午休谎报"实时"。
+#
+# 前端「收盘自动收手」只认 session=="closed"（index.html 里
+#   `if(d.session==='closed') stopHLive(...)`）。所以 **午休绝不能返回 closed**，
+#   否则会被误报成"已收盘"而掐掉刷新；午休应继续刷（价冻结、刷了也白刷但无害），
+#   具体口径由 note 字段说明"午间休市（这是 11:30 的收盘价）"。
+#
+# 取值：weekend / premarket / morning / lunch / afternoon / after
+_LUNCH_NOTE = "午间休市（这是 11:30 的收盘价），下面显示的就是它。"
+
+
+def _market_phase(now: datetime | None = None) -> str:
+    """按本机时钟返回当前所处的交易时段（纯函数，now 可注入用于测试）。
+
+    ★ 为什么不用 core.time_progress：它把 00:00–09:30、11:30–13:00 都当"交易中"，
+      导致午休/深夜被当成可刷新的交易时段（见 S1 缺陷）。这里用显式区间判断。
+    """
+    now = now or datetime.now()
+    if now.weekday() >= 5:                      # 周六/周日
+        return "weekend"
+    h, mi = now.hour, now.minute
+    if (h, mi) < (9, 30):
+        return "premarket"                      # 盘前 00:00–09:30
+    if (h, mi) < (11, 30):
+        return "morning"                        # 上午 09:30–11:30
+    if (h, mi) < (13, 0):
+        return "lunch"                          # 午休 11:30–13:00（价冻结）
+    if (h, mi) < (15, 0):
+        return "afternoon"                      # 下午 13:00–15:00
+    return "after"                              # 收盘后 15:00 之后
+
+
+def _parse_hm(timestr):
+    """把 "HH:MM" 解析成 (h, mi)；非法返回 (None, None)。"""
+    try:
+        parts = str(timestr).split(":")
+        return int(parts[0]), int(parts[1])
+    except (ValueError, TypeError, IndexError):
+        return None, None
+
+
 def _quote_session(qdate: str, qtime: str) -> str:
     """实时快照属于「交易中」还是「已收盘」。
 
     ★ 15:00 之后实时价就是收盘价，再按秒去拉不会有新信息 ——
       前端据此自动收手（与「盘中参考」的实时更新同一套逻辑）。
+    ★ 午休（11:30–13:00）行情源把 time 刷新成当前时刻、但价格冻结在 11:30 收盘，
+      这里**不**返回 closed（否则午休会被误报成"已收盘"），交由 note 说明。
     """
     if qdate != _today_str():
         return "closed"
-    try:
-        h, mi = (int(x) for x in str(qtime).split(":")[:2])
-        return "trading" if core.time_progress(h, mi) < 1.0 else "closed"
-    except Exception:
+    h, mi = _parse_hm(qtime)
+    if h is None:
+        return _clock_session()
+    if (h, mi) < (9, 30) or (h, mi) >= (15, 0):
         return "closed"
+    return "trading"                            # 含午休：不报"已收盘"
 
 
 def _clock_session() -> str:
-    """按本机时钟判断「现在还需要不需要刷新行情」。
+    """按本机时钟判断「现在还有没有必要刷实时行情」（前端"收盘自动收手"只看这个）。
 
-    ★ 为什么降级（收盘价）那条路上**不能**直接写 session="closed"：
-      取不到实时行情时页面拿到的是收盘价，但那不代表"已经收盘"。
-      若这里回 closed，前端的"收盘自动收手"会被触发，用户会看到
-      「已收盘」这个错误的停止理由 —— 真相是网络/数据源出了问题。
-      所以降级路径用**时钟**判断：交易时段内就让它继续重试，
-      超时/收盘了才收手（前端另有连续失败 3 次自动停止兜底）。
+    ★ 周末 / 盘前(00:00–09:30) / 收盘后(15:00+) → "closed"（不刷，前端自动收手）。
+      上午 / 下午 → "trading"（刷）。
+      午休 → "trading"：**不**返回 closed，否则会被误报成"已收盘"；
+             价已冻结在 11:30 收盘，具体口径由 _hold_payload 的 note 说明。
     """
-    now = datetime.now()
-    if now.weekday() >= 5:                 # 周末不必刷
+    ph = _market_phase()
+    if ph in ("weekend", "premarket", "after"):
         return "closed"
+    return "trading"
+
+
+def _call_evaluate_holdings(persist: bool, **kwargs):
+    """调 tasks.evaluate_holdings，并把 persist 透传过去（S2 修复需要）。
+
+    ★ 为什么这层兜底：另一个 worker 正在给 evaluate_holdings 加 persist 参数，
+      server.py 这边先按约定传 persist。py_compile 能过（关键字参数运行时才校验），
+      但若 tasks.py 那边还没合入 persist，直接传会 TypeError 把整个 /api/holdings
+      炸掉。这里用 try/except TypeError 兜一层：参数没加上时自动回落旧签名
+      （旧签名默认就会写库，与 persist=True 的实时路径行为一致，不会静默丢数据）。
+
+      选 try/except TypeError 而非 hasattr/inspect：tasks.evaluate_holdings 在单测里
+      常被 lambda/*args/**kwargs 替身替换，hasattr/inspect 在替身上可能给出误导结果；
+      而直接"试调用 + 失败回落"永远以真实运行结果为准，最稳。
+    """
     try:
-        return "trading" if core.time_progress(now.hour, now.minute) < 1.0 else "closed"
-    except Exception:
-        return "closed"
+        return tasks.evaluate_holdings(persist=persist, **kwargs)
+    except TypeError:
+        kwargs.pop("persist", None)
+        return tasks.evaluate_holdings(**kwargs)
 
 
 def _eval_live(hs: list[dict]) -> dict:
@@ -529,6 +591,13 @@ def _eval_live(hs: list[dict]) -> dict:
     quotes, qdate, qtime, src = {}, "", "", ""
     for c in codes:
         q = raw.get(c)
+        # ★ 停牌股：行情里 close 字段装的是【昨收】而非实时价，
+        #   同时带着 suspended=True 标志（见 strategy_core.py:762-766）。
+        #   必须把它当"没取到实时价"处理——走既有的缺失路径，
+        #   最终由 got < total 的 all-or-nothing 逻辑点名报错，
+        #   绝不把昨收当成实时价写进持仓峰值（否则会污染移动止盈）。
+        if q and q.get("suspended"):
+            continue
         if q and q.get("close"):
             quotes[c] = float(q["close"])
             qdate = q.get("date") or qdate
@@ -540,14 +609,23 @@ def _eval_live(hs: list[dict]) -> dict:
     if got < total:
         miss = "、".join(c for c in codes if c not in quotes)
         return dict(rows=None, got=got, total=total, err=f"{miss} 没有实时价")
+    # ★ 午休标记（注意：**不改 rows**）：
+    #   11:30–13:00 行情源把快照 time 刷新成当前时刻、价格却冻结在 11:30 收盘
+    #   （实测 000048 time=12:05 close=18.36 prev=19.43）。这个价**是真的**，
+    #   而且就是当下能拿到的最新价 —— 所以必须照常显示，不能降级成"没有价"
+    #   （否则当天刚买入的票会显示成「—」，用户点刷新只看到横杠，更糟）。
+    #   但它是"冻结价"不是"实时价"，所以带上 lunch=True，由 _hold_payload 把
+    #   整表标成「午间休市」并**不写入实时缓存**，避免 2 分钟内的非实时加载
+    #   把它当成 live=True 返回。
+    _lunch = (_market_phase() == "lunch")
     try:
-        rows = tasks.evaluate_holdings(quotes=quotes,
+        rows = _call_evaluate_holdings(persist=True, quotes=quotes,
                                        quote_date=qdate or _today_str(),
                                        latest_market_date=_today_str(),
                                        intraday=True)
     except Exception as e:
         return dict(rows=None, got=0, total=total, err=f"{type(e).__name__}: {e}")
-    return dict(rows=rows, got=got, total=total,
+    return dict(rows=rows, got=got, total=total, lunch=_lunch,
                 quote_date=qdate, quote_time=qtime, src=src, err="")
 
 
@@ -558,7 +636,7 @@ def _warm_hold_cache(mdate: str = "") -> None:
     """
     t0 = time.time()
     try:
-        hs = tasks.evaluate_holdings(latest_market_date=mdate or "")
+        hs = _call_evaluate_holdings(persist=False, latest_market_date=mdate or "")
         if not hs:
             with _HOLD_LOCK:
                 _HOLD.update(ts=0.0, sig="", rows=None)
@@ -610,7 +688,7 @@ def _hold_payload(force_live: bool) -> dict:
     """
     d = db.get_daily() or {}
     mdate = d.get("date", "")
-    hs = tasks.evaluate_holdings(latest_market_date=mdate)
+    hs = _call_evaluate_holdings(persist=False, latest_market_date=mdate)
     ec = tasks.exit_config()
     # 出场参数一并返回给前端：max_hold_days 用于标记「已超期」，
     # exit 用于让卡片标题里的「止损 -6% · 止盈 +6%/+10%」跟着配置走，不再写死。
@@ -648,7 +726,7 @@ def _hold_payload(force_live: bool) -> dict:
     if force_live:
         t0 = time.time()                      # 记下起跑时刻，用于「拒旧盖新」
         ev = _eval_live(hs)
-        if ev["rows"] is not None:
+        if ev["rows"] is not None and not ev.get("lunch"):
             ses = _quote_session(ev["quote_date"], ev["quote_time"])
             asof = ev["quote_time"] or ev["quote_date"]
             with _HOLD_LOCK:
@@ -663,6 +741,21 @@ def _hold_payload(force_live: bool) -> dict:
                         asof=asof, quote_date=ev["quote_date"],
                         quote_time=ev["quote_time"], src=ev["src"], note="")
             return base
+        if ev.get("lunch"):
+            # ★ 午休：价是**真的**（冻结在 11:30 收盘，也是当下能拿到的最新价），
+            #   所以照常显示数字，但绝不标「实时」（否则界面写「数据：实时 12:05」
+            #   而那其实是 11:30 的价 —— 谎报），也不写实时缓存。
+            #   partial=True → 前端当"降级"显示（琥珀色「午间休市」），不计入连续
+            #   失败、不误触发自动停止；session 由 _clock_session 给 "trading"，
+            #   所以也不会误报"已收盘"而把刷新掐掉。
+            base.update(holdings=ev["rows"], live=False, data_mode="close",
+                        partial=True, session=_clock_session(),
+                        asof=ev["quote_time"] or ev["quote_date"],
+                        quote_date=ev["quote_date"], quote_time=ev["quote_time"],
+                        src=ev["src"], note=_LUNCH_NOTE)
+            if base["busy"]:
+                base["note"] += f"\n★ {base['busy']}，此刻数字可能新旧参差，等它跑完再看更准。"
+            return base
         if ev["got"]:
             # 部分成功：**整表不许标实时**，缺价的那几只前端显示的是收盘价。
             # partial=True 让前端知道「这不是网络坏了，是某几只票没价」
@@ -674,7 +767,14 @@ def _hold_payload(force_live: bool) -> dict:
         else:
             note = f"实时行情暂时取不到（{ev['err']}），下面显示的是{day}收盘价。"
     else:
-        note = f"下面显示的是{day}收盘价。点「⟳ 刷新持仓」可以拿到实时价。"
+        if _market_phase() == "lunch" and mdate:
+            # 默认加载（未强制拉实时）：午休时本地就是 11:30 收盘口径，
+            # 状态行要明说"午间休市"，不能让人以为下面是不新鲜的旧数据。
+            # ★ 必须带 `and mdate`：本地一张日线都没有时表里是「—」，
+            #   那时说"下面显示的就是 11:30 收盘价"是在骗人。
+            note = _LUNCH_NOTE
+        else:
+            note = f"下面显示的是{day}收盘价。点「⟳ 刷新持仓」可以拿到实时价。"
 
     busy = base["busy"]
     if busy:

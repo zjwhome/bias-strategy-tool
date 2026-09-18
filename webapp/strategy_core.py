@@ -28,6 +28,7 @@ import socket
 import threading
 import glob
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutTimeout
 from datetime import datetime
 
@@ -67,6 +68,7 @@ DEFAULTS = dict(
     retry=3,
     main_board_only=True,    # ★ 用户只看沪深主板（见 board_scope）
     breadth_threshold_main=30,   # 主板口径的等效门槛（历史推导：主板≥30 ≈ 全市场≥50，见 strategy_config.board_scope）
+    max_daily_signals=10,    # ★ 单日最多出手几只（position.max_daily_signals）
 )
 
 
@@ -109,6 +111,13 @@ def load_config() -> dict:
         tmm = (rg.get("presets", {}).get(key, {}) or {}).get("threshold_main_board")
         if tmm:
             cfg["breadth_threshold_main"] = int(tmm)
+        # ★ 单日最多出手几只（2026-09-18 审计修复）：
+        #   这个值以前**只在界面文案上改，代码里写死 10** —— 用户把它调成 5，
+        #   界面写着"最多 5 只"，实际仍然选出 10 只。属于"说了和做的不一致"。
+        pos = j.get("position", {}) or {}
+        mds = pos.get("max_daily_signals")
+        if mds:
+            cfg["max_daily_signals"] = int(mds)
     except Exception as e:
         print(f"[config] 读取失败，使用默认值：{e}")
     # ★ 参数健全性：这几个值一旦被填成 0 / 负数，计算会静默产出垃圾
@@ -121,7 +130,8 @@ def load_config() -> dict:
     #      用户把放量倍数调松到 0.8 倍，实际跑的还是 1.5 倍，界面上也不显示这个数。
     for k, lo, cast in (("bias_period", 2, int), ("vol_surge", 0.01, float),
                         ("min_list_days", 0, int), ("min_amount", 1, float),
-                        ("workers", 1, int), ("retry", 1, int)):
+                        ("workers", 1, int), ("retry", 1, int),
+                        ("max_daily_signals", 1, int)):
         try:
             if cast(cfg[k]) < lo:
                 print(f"[config] ⚠️ {k}={cfg[k]} 不合理（应 ≥ {lo}），已回落到默认 "
@@ -507,10 +517,39 @@ def job_one(code: str, expect_date: str | None = None):
     #   `ex.shutdown(wait=False)` 不再等待这个线程 —— 就会留下半截文件；
     #   而盘中扫描是逐只读文件**尾部字节**的，读到半行会解析失败 → 该股被静默跳过。
     #   临时文件用 .tmp 后缀，不会命中 load_dataset / 基准构建的 *.csv 通配。
+    # ★★ 拒绝"往回覆盖"（2026-09-18 审计修复）★★
+    #   旧实现是**先落盘、再判 expect_date**，于是数据源返回了更旧的一批数据时
+    #   （本地已有 09-17、这轮抓到 09-16），文件照样被覆盖成 09-16，
+    #   函数却只返回 None（表示"本轮未完成"）。
+    #   后果：该股**静默地从当日清单里消失**（广度少算一只、候选股可能因此漏掉），
+    #   而且没有任何一行日志说"我把文件改旧了"。数据源限流重试很容易走到这条路。
+    #   所以：写之前先比一次，只要新数据更旧、或行数明显缩水，就**拒绝覆盖**。
+    new_latest = ""
+    try:
+        new_latest = str(pd.to_datetime(d["date"], errors="coerce").max().date())
+    except Exception:
+        new_latest = ""
+    old_latest, old_rows_n = "", 0
+    try:
+        if os.path.exists(p):
+            old_frame = pd.read_csv(p, usecols=["date"])
+            old_rows_n = len(old_frame)
+            old_latest = str(pd.to_datetime(old_frame["date"], errors="coerce").max().date())
+    except Exception:
+        old_latest, old_rows_n = "", 0     # 读不动就当作没有旧文件（放行，与旧行为一致）
+    if old_latest and new_latest and new_latest < old_latest:
+        print(f"  ⚠️ {code} 拿到更旧的数据（{new_latest} < 本地 {old_latest}），"
+              f"**已拒绝覆盖**，保留本地原有 {old_rows_n} 行", flush=True)
+        return code, None
+    if old_rows_n and len(d) < old_rows_n * 0.95:
+        print(f"  ⚠️ {code} 行数明显缩水（{len(d)} < 本地 {old_rows_n} 的 95%），"
+              f"**已拒绝覆盖**", flush=True)
+        return code, None
+
     tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         d.to_csv(tmp, index=False, encoding="utf-8-sig")
-        os.replace(tmp, p)                  # 陈旧数据也先落盘，总比没有好
+        os.replace(tmp, p)
     except Exception as e:
         try:
             if os.path.exists(tmp):
@@ -588,13 +627,28 @@ def compute_features(data: pd.DataFrame) -> pd.DataFrame:
     data["vol_ok"] = data["volume"] >= data["vol_ma5"] * CFG["vol_surge"]
     data["chg5d_ok"] = data["chg5d"] < 0
     data["size_ok"] = data["bar_no"] >= CFG["min_list_days"]
-    # ★ 成交额条件：本地缓存理论上一定有 amount 列；若无（数据源变动 / 老缓存），
-    #   直接 data["amount"] 会抛 KeyError 让整次更新崩掉，这里做兜底并明确告警。
+    # ★★ 成交额条件：**缺列不能当"通过"**（2026-09-18 审计修复）★★
+    #   旧实现缺 amount 列时写 amt_ok = True 并只 print 一行告警 —— 等于把
+    #   "成交额 ≥ 8000 万" 这条硬门槛整条放行，广度会**偏高**，而偏高又会被
+    #   当作真实信号写进库里、并进入 250 日广度曲线，**静默污染择时总开关**。
+    #   这是最危险的一类错：数字看起来正常，日志也只是一行 warn。
+    #   所以改成**直接拒绝**（宁可不写库，也不要写错的库）。
+    #   同一个道理，"有列但全是 NaN"（数据源改了字段格式）同样不可用 ——
+    #   那时逐行比较恒为 False，广度会变成 0，看着像"今天没机会"，
+    #   同样是拿一个错的数当真结论。
     if "amount" in data.columns:
-        data["amt_ok"] = pd.to_numeric(data["amount"], errors="coerce") >= CFG["min_amount"]
+        _amt = pd.to_numeric(data["amount"], errors="coerce")
+        if not _amt.notna().any():
+            raise RuntimeError(
+                "本地数据的 amount（成交额）列全为空值，无法判定「成交额 ≥ 8000 万」"
+                "这条硬门槛。已拒绝用偏高/偏低的口径写库 —— "
+                "请到「盘后总结」点一次「更新数据（盘后任务）」重新下载。")
+        data["amt_ok"] = _amt >= CFG["min_amount"]
     else:
-        data["amt_ok"] = True
-        print("[features] ⚠️ 数据缺少 amount 列，成交额门槛已跳过（广度会偏高）")
+        raise RuntimeError(
+            "本地数据缺少 amount（成交额）列，无法判定「成交额 ≥ 8000 万」这条硬门槛。"
+            "把缺列当成通过会让广度偏高、并写进历史曲线污染择时总开关，"
+            "所以这里直接拒绝。请到「盘后总结」点一次「更新数据（盘后任务）」重新下载。")
     if "turnover" in data.columns:
         data["turnover_pct"] = pd.to_numeric(data["turnover"], errors="coerce") * 100
     else:
@@ -759,12 +813,6 @@ def _parse_tencent(txt: str) -> dict:
             prev = float(f[4] or 0)
         except Exception:
             continue
-        # ★ 记住"这一只其实没有成交"（停牌/未开盘）。price 用昨收兜底只是为了
-        #   让持仓估值不至于变成 0，但**绝不能**拿它去算当日的乖离率 ——
-        #   盘中扫描必须靠这个标志把停牌股剔掉（见 intraday_scan）。
-        suspended = raw_price <= 0
-        price = prev if suspended else raw_price
-        t = f[30]
         # ★ 盘中扫描需要的额外字段（腾讯快照下标已实测确认）：
         #   [36] 成交量(手)   [57] 成交额(万元，精确)   [38] 换手率(%)
         #   [45] 总市值(亿元)  [49] 量比（腾讯自己的口径，仅作交叉校验）
@@ -773,6 +821,23 @@ def _parse_tencent(txt: str) -> dict:
                 return float(f[i])
             except Exception:
                 return d
+
+        # ★ 记住"这一只其实没有成交"（停牌/未开盘）。price 用昨收兜底只是为了
+        #   让持仓估值不至于变成 0，但**绝不能**拿它去算当日的乖离率 ——
+        #   盘中扫描必须靠这个标志把停牌股剔掉（见 intraday_scan）。
+        # ★★ 2026-09-18 修：原来只判 `raw_price <= 0`，但腾讯对停牌股返回的是
+        #   「当前价 = 昨收、且 > 0」，这个判据**根本拦不住**。实测 601238 停牌时
+        #   报文为 [3]=5.09 [4]=5.09 [5]=0.00 [33]=[34]=0.00 [36]=0，
+        #   被判成 suspended=False → **昨收被当成今日实时价**流向三个消费点：
+        #   持仓体检（报出假止盈/假止损，还会把昨收写进 peak_price 永久污染）、
+        #   盘中扫描、以及接口层的实时通道。这与当天那起「假清仓」是同一失效模式。
+        #   停牌的本质特征是「当日没有成交量」，所以补上 vol_hand 判据。
+        #   注意别误伤：涨跌停的"一字板"是**有成交量**的（vol_hand > 0），
+        #   竞价撮合后也有量，都不会被判成停牌。
+        vol_hand = _f(36)
+        suspended = (raw_price <= 0) or (vol_hand <= 0)
+        price = prev if suspended else raw_price
+        t = f[30]
         out[code6] = dict(
             code=code6, name=f[1],
             date=f"{t[0:4]}-{t[4:6]}-{t[6:8]}" if len(t) >= 8 else "",
@@ -808,14 +873,22 @@ def _parse_sina(txt: str) -> dict:
             prev = float(f[2] or 0)
         except Exception:
             continue
-        # 同 _parse_tencent：停牌/无成交要用标志记下来，不能靠"价格等于昨收"去猜
-        suspended = raw_price <= 0
+        # 同 _parse_tencent：停牌/无成交要用标志记下来，不能靠"价格等于昨收"去猜。
+        # ★ 2026-09-18 同款修复：新浪在停牌时也会**照常把昨收填进当前价字段**，
+        #   所以 `raw_price <= 0` 这个判据同样拦不住，必须补上"当日无成交量"
+        #   这个本质特征（f[8] = 当日累计成交量，新浪给的单位是「股」）。
+        try:
+            vol_share = float(f[8] or 0)
+        except Exception:
+            vol_share = 0.0
+        suspended = (raw_price <= 0) or (vol_share <= 0)
         price = prev if suspended else raw_price
         out[code6] = dict(
             code=code6, name=f[0], date=f[30], time=(f[31] or "")[:5],
             close=price, prev=prev, suspended=suspended,
             open=float(f[1] or 0), high=float(f[4] or 0), low=float(f[5] or 0),
             change_pct=round((price - prev) / prev * 100, 2) if prev else 0.0,
+            vol_hand=round(vol_share / 100.0, 2),     # 统一成「手」，与腾讯口径一致
             source="新浪")
     return out
 
@@ -1505,6 +1578,25 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
     base_date = ""
     cmp_n = cmp_bad = 0            # 自算量比 vs 腾讯量比 的一致性自检
     n_per = int(CFG["bias_period"])
+
+    # ★★ 个股数据新鲜度闸门（2026-09-18 审计修复）★★
+    #   逐只 CSV 落后 1~N 天时（那次下载失败 / 被往回覆盖 / 长期停牌后复牌），
+    #   它的「今天之前 23 根」其实是**更早的 23 根**，算出来的 MA24 / Chg5D / 量比
+    #   数字看起来完全正常，但是错的 —— 与 09-18 那次假信号同一个失效模式，
+    #   只是入口不同。所以落后于全市场主流交易日的个股整只跳过，并点名报出来。
+    #   参照值取「众数」而不是最大值：最大值可能被单只脏数据带偏（未来日期），
+    #   而全市场绝大多数股票共有的那一个日期，一定就是真实的最近交易日。
+    ref_date = ""
+    try:
+        _cnt = Counter(str(b.get("data_date") or "") for b in base.values())
+        _cnt.pop("", None)
+        if _cnt:
+            ref_date = _cnt.most_common(1)[0][0]
+    except Exception:
+        ref_date = ""            # 算不出来就放行（宁可多算，也不要因为闸门本身出错而清空清单）
+    n_stale = 0
+    stale_codes = []
+
     for code, q in rt.items():
         b = base.get(code)
         if not b:
@@ -1520,6 +1612,19 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         if price <= 0:
             n_susp += 1
             continue
+        # ★ 个股日线新鲜度：落后于全市场主流交易日 → 整只跳过（理由见循环上方）
+        _bd = str(b.get("data_date") or "")
+        if ref_date and _bd and _bd < ref_date:
+            n_stale += 1
+            if len(stale_codes) < 20:
+                stale_codes.append(f"{code}({_bd})")
+            continue
+        # ★ NaN 的乖离率不能进清单（2026-09-18 审计修复）：
+        #   下面那句 `if bias > threshold: continue` 对 NaN **恒为 False**
+        #   （NaN 与任何数比较都是 False），于是 NaN 行既不会被拦掉，
+        #   也没法进 "达标/仅乖离率" 的正常判定 —— 页面上会冒出一条 bias 显示
+        #   为 NaN 的假行，排序时还会把整张表的位置搅乱。
+        #   数据不足 24 根但 n_prior 恰好凑够的边界样本就会走到这里，必须先判掉。
         # ★ 最少 K 线数：收盘口径 ma = rolling(n, min_periods=n)，今日有值需要
         #   「今日之前 ≥ n-1 根」。写成 ≥n 会多卡掉 1 根，与盘后结果对不齐。
         n_prior = int(b.get("n_prior") or 0)
@@ -1532,7 +1637,6 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         bd = str(b.get("data_date") or "")
         if bd > base_date:
             base_date = bd
-
         sum_v4 = float(b.get("sum_v4") or 0)
         sum_v5 = float(b.get("sum_v5") or 0)
         vol_today = _shares_today(q)                            # ★ 已按板块修正单位
@@ -1564,6 +1668,12 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
                     cmp_bad += 1
 
         bias = (price - ma) / ma * 100
+        # ★ NaN 直接丢（理由见循环内 price<=0 之后的注释）：不做这一步的话，
+        #   NaN 既过不了 `>` 判断（恒 False，不被 continue 拦下）、
+        #   又算不出任何条件，最后会以一条 bias=NaN 的假行进清单。
+        if not np.isfinite(bias):
+            n_scanned -= 1                 # 本次不计入"已扫描"，避免口径虚高
+            continue
         if bias > CFG["bias_threshold"]:
             continue                                    # 乖离率都没达标，两类清单都不进
         c5 = float(b.get("close5") or 0)
@@ -1635,7 +1745,9 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
     log(f"[盘中] 扫描 {n_scanned} 只：主板达标 {len(hits)} 只 / 仅乖离率符合 {len(near)} 只"
         f"（全市场口径 {hits_full} / {near_full}；时间进度 {prog*100:.1f}%；"
         f"本地日线覆盖 {cover*100:.1f}%"
-        + (f"；停牌跳过 {n_susp} 只" if n_susp else "") + "）")
+        + (f"；停牌跳过 {n_susp} 只" if n_susp else "")
+        + (f"；日线落后跳过 {n_stale} 只（{'、'.join(stale_codes[:8])}"
+           f"{'…' if n_stale > 8 else ''}）" if n_stale else "") + "）")
     if cmp_n:
         log(f"[盘中] 量比自检：{cmp_n} 只可比对，偏离>25% 的 {cmp_bad} 只"
             f"（{'正常' if cmp_bad < cmp_n * 0.05 else '⚠ 异常，请检查单位口径'}）")
@@ -1652,6 +1764,8 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         quote_date=quote_date, quote_time=q_time, session=session,
         base_date=base_date, progress=prog, early=early,
         scanned=n_scanned, quotes=len(rt), suspended=n_susp, cover=round(cover, 4),
+        # ★ 日线落后于全市场主流交易日而被跳过的只数（审计新增，供上层与页面说明）
+        stale_skipped=n_stale, stale_codes=stale_codes,
         vol_cmp=cmp_n, vol_bad=cmp_bad,
         # ★ 下游判断「自检是否真的跑过」要用这个，不要用 vol_bad==0：
         #   cmp_n=0 时 vol_bad 必然也是 0，那不是通过，是没测。

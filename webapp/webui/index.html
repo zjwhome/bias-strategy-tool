@@ -777,6 +777,33 @@ footer b{color:var(--ink-2)}
     top:9px;bottom:9px;width:3px;border-radius:3px;background:var(--brand)}
 }
 
+/* ★ 手机（≤640px）：菜单改成两行网格，**保证五项全部看得见**。
+   2026-09-18 真机审计抓到：窄屏下导航仍是「一条横向滚动带」，
+   五个标签 + 两个分组标题合计约 757px 挤进 390px 的屏幕 ——
+   「我的持仓」整项落在屏幕外，**它的止损红点也跟着落在外**。
+   而用户最需要一眼看到的恰恰是那个红点（"有持仓触发止损"）。
+   横向滚动条是隐藏的（scrollbar-width:none），用户根本看不出右边还有东西。
+   所以这里不再滚动，改为换行成 3+2 网格：
+   · 分组标题（今日流程 / 我的）恢复显示并独占整行 —— 手机端也就重新有了
+     「按一天的时间顺序」这个结构，不再是五个孤立的按钮；
+   · 隐藏图标（省下 15px+间距，手机上图标本来也认不出来），字号降一档；
+   · 角标数字保留 —— 「不点进去也能判断要不要细看」正是它的价值。 */
+@media (max-width:640px){
+  .nav{flex-wrap:wrap;overflow:visible;gap:4px}
+  /* ★ 选择器必须写成 `.nav .nav-sep`（两段类名），不能只写 `.nav-sep`：
+     基础样式 `.nav-sep{display:none}` 写在**本块之后**（文件靠下那一段
+     「导航分组标题（只在宽屏左栏显示）」），同等特异性时后者胜 ——
+     只写单类名会在真机上被它盖掉（实测 display 仍是 none，分组标题根本不出现）。 */
+  .nav .nav-sep{display:block;flex:1 1 100%;margin:var(--s-2) 0 0;padding:0 2px;
+    font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--ink-3)}
+  .nav .nav-sep.first{margin-top:0}
+  .nav-i{flex:1 1 calc(33.333% - 4px);min-width:0;justify-content:center;
+    padding:8px 5px;font-size:var(--t-sm)}
+  .nav-ico{display:none}
+  .nav-txt{white-space:nowrap}
+  .nav-sub{margin-left:0;padding-left:6px;font-size:11px}
+}
+
 /* ---- 子标签（分区内部的分段开关） ---- */
 .subtabs{display:inline-flex;gap:2px;padding:3px;border-radius:var(--r-md);
   background:var(--surface-2);border:1px solid var(--line);margin-bottom:var(--s-4);
@@ -1161,8 +1188,8 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     <details class="nav-help">
       <summary>怎么看这个菜单</summary>
       <ul>
-        <li class="hot"><span><b>红点</b>：今天可以出手，或持仓触发止损</span></li>
-        <li class="warn"><span><b>琥珀点</b>：持仓到了锁利线，值得看一眼</span></li>
+        <li class="hot"><span><b>红点</b>：有票可以出手（广度达到门槛），或持仓触发了止损</span></li>
+        <li class="warn"><span><b>琥珀点</b>：值得看一眼 —— 持仓到了锁利线，或这一页显示的是上次的结果（已过时）</span></li>
         <li><span><b>角标</b>：那一页最要紧的数字，不点进去也能判断要不要细看</span></li>
       </ul>
     </details>
@@ -1357,7 +1384,7 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
   </div>
 
   <div class="card">
-    <h2>数据状态 <span class="tag">全市场 5017 只</span></h2>
+    <h2>数据状态 <span class="tag" id="tagUniv">全市场</span></h2>
     <div class="stats" id="postStats"></div>
     <p class="intra-note" id="postNote">正在读取…</p>
   </div>
@@ -1767,6 +1794,23 @@ async function jpost(url, body, method){
   return r.json();
 }
 
+/* ★ 点击类操作的统一取数口（2026-09-18 真机审计修复）：
+   后端没起来时 fetch 直接 reject，而「跑任务 / 保存定时 / 登记持仓 / 删除持仓」
+   这几处原来都是裸的 `await jpost(...)` —— 异常一路抛进 console，
+   界面**一点反应都没有**：按钮不解锁、不报错、也不告诉你下一步做什么。
+   用户只会反复点，然后以为"这东西坏了"。
+   （用户的实际使用方式就是双击 `webapp\控制台.bat` 起服务；忘了起、或服务
+     已经退出，就会正好撞上这个场景 —— 不是罕见路径。）
+   这里把网络异常**翻译成与接口失败同一种形状**（ok:false + 人话），
+   于是下游原有的 `if(!r.ok) showBanner(r.msg,"err")` 一个字都不用改。 */
+async function jact(url, body, method){
+  try{ return await jpost(url, body, method); }
+  catch(e){
+    return { ok:false,
+             msg:"连不上本机服务。请双击 webapp 文件夹里的「控制台.bat」启动服务，再重试。" };
+  }
+}
+
 async function loadStatus(){
   try{ applyStatus(await jget("/api/status")); }
   catch(e){ $("hRight").textContent="后端未连接"; }
@@ -1876,6 +1920,13 @@ function setPill(id, txt, cls){
    而不必去比对别的页面。 */
 function renderPostStats(t){
   const box=$('postStats'), note=$('postNote');
+  /* ★ 卡片标题里那个「全市场 5017 只」原来是写死在 HTML 里的
+     （2026-09-18 真机审计）：一页里同时出现 5017（清单条数）和 5007（当日真有
+     行情的条数，差的是停牌股），两个数字并排而没有任何说明，读起来像自相矛盾。
+     现在改成从接口拿「当日真有行情的只数」，标签本身就说明了它是什么。 */
+  const univ=$('tagUniv');
+  if(univ) univ.textContent = t && t.stocks_total
+    ? ('当日有行情 '+fmt(t.stocks_total)+' 只') : '全市场';
   if(!box) return;
   if(!t){
     box.innerHTML='';
@@ -2264,9 +2315,18 @@ async function loadIntraday(){
 
   /* 菜单角标：这一页最该知道的是「有没有可操作的票」。
      ★ 隔天的旧结果必须显式标出来 —— 把昨天的清单当成今天的参考是这里最
-       危险的一种误读，得在菜单上就先拦住。 */
+       危险的一种误读，得在菜单上就先拦住。
+     ★★ 红点条件必须是**门槛**，不是「主板达标数 > 0」（2026-09-18 真机审计修复）：
+        旧写法 `pool>0` 只数了个数，跟门槛无关 —— 主板门槛是 30 只，
+        于是「主板只有 5 只达标、全市场也没到门槛」时，菜单照样亮红点，
+        而图例写着「红点：今天可以出手」。**菜单与策略信号正好相反**，
+        是全站最容易被照着下单的一处误读。
+        本页自己的页头胶囊（见上面 pcls 那段）用的是 gate||gateM ——
+        现在菜单与它对齐，同一页不再有两套说法。
+        ⚠️ 不复用 pool 的数值语义：数字仍报主板达标数（那才是"有多少机会"），
+           只有"亮不亮红点"改由门槛决定。 */
   if(staleDay)      navIntra('上次 '+(pool>0?pool:nearN)+' 只', true, 'warn');
-  else if(pool>0)   navIntra(pool+' 只', true, 'hot');
+  else if(gate||gateM) navIntra(pool>0?pool+' 只':'门槛达标', true, 'hot');
   else if(nearN>0)  navIntra(nearN+' 只', true, '');
   else              navIntra('无', false);
 
@@ -2892,7 +2952,7 @@ async function addHolding(){
   const p=parseFloat(price);
   if(!(p>0)){ showBanner("买入价必须大于 0。","err"); return; }
   if(!/^\d{5,6}$/.test(code)){ showBanner("股票代码应为 6 位数字，例如 300274。","err"); return; }
-  const r=await jpost("/api/holdings",{code,name:$("fName").value.trim(),buy_date:date,
+  const r=await jact("/api/holdings",{code,name:$("fName").value.trim(),buy_date:date,
     buy_price:p,shares:parseInt($("fShares").value||"0")});
   if(!r.ok){ showBanner(r.msg||"添加失败","err"); return; }
   hideBanner(); $("fCode").value=$("fName").value=$("fPrice").value=$("fShares").value="";
@@ -2904,7 +2964,7 @@ async function delHolding(id){
      页面开着很久、或记录已在另一个标签页被删掉，接口会回 404 并说明原因。
      旧写法 `await jpost(...)` 把整个结果丢掉：用户点了删除、界面毫无反应，
      只能靠自己刷新页面猜发生了什么。 */
-  const r=await jpost("/api/holdings/"+id,null,"DELETE");
+  const r=await jact("/api/holdings/"+id,null,"DELETE");
   if(!r.ok) showBanner(r.msg||"删除失败","err"); else hideBanner();
   loadHoldings();
 }
@@ -3188,7 +3248,7 @@ async function loadHist(key){
 }
 
 async function runTask(key){
-  const r=await jpost('/api/tasks/'+key+'/run');
+  const r=await jact('/api/tasks/'+key+'/run');
   showBanner(r.msg||'', r.ok?'info':'err');
   if(r.ok){
     /* ★ 不再"跳去任务中心"（那一层已经没有了）—— 任务就在用户当前这一页，
@@ -3272,7 +3332,7 @@ async function saveSchedule(key){
   const days=[...box.querySelectorAll('input[data-day]')]
     .filter(x=>x.checked).map(x=>x.dataset.day).join(',');
   if(enabled && !days){ showBanner("开启定时时，请至少勾选一个星期。","err"); return; }
-  const r=await jpost('/api/tasks/'+key+'/schedule',{enabled:enabled,at_time:at,days:days});
+  const r=await jact('/api/tasks/'+key+'/schedule',{enabled:enabled,at_time:at,days:days});
   showBanner(r.msg||'', r.ok?'info':'err');
   await loadTasks();
 }
@@ -3284,6 +3344,16 @@ async function loadAll(){
        连带把任务中心、曲线一起卡住不更新，这跟原来逐个 try/catch 的意图一致。 */
   const rs=await Promise.allSettled(
     [loadStatus,loadToday,loadIntraday,loadHistory,loadHoldings,loadTasks].map(f=>f()));
+  /* ★★ 首屏出完之后，再自动补一次**持仓实时价**（一次性，不是定时器）。
+     为什么必须有这一步：行情新鲜度闸门会把「早于买入日 / 比最新交易日还旧」
+     的兜底价判为不可用 —— 那正是假止损、假止盈、假「★ 清仓」的来源，
+     于是**当天刚买入**的持仓在兜底口径下只会显示「—」。
+     而用户打开这一页想看的就是"现在值多少"，不该还要手点一次「⟳ 刷新持仓」。
+     用 refreshHLive() 而不是直接 loadHoldings(true)：busy / 倒计时归位 /
+     连续失败计数 / 降级标记这些状态机只有它维护得对（见上面 refreshHLive 注释）。
+     HLIVE.on 为 false 时它会刷完这一轮就自然收手，不会起定时器 ——
+     自动刷新依旧完全由用户按「开始刷新」决定。 */
+  refreshHLive().catch(()=>{});
   return rs.some(r=>r.status==='fulfilled');
 }
 

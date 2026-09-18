@@ -100,7 +100,10 @@ def run_update(limit: int = 0, date: str = "", no_fetch: bool = False,
 
     # ---------- 5. 候选股 ----------
     # ★ 用户只看沪深主板 → 买入名单按主板过滤（全市场清单可用 board_only=False 拿到）
-    cand = core.pick_candidates(data, target, limit=10)
+    # ★ 单日限流条数从配置读（2026-09-18 审计修复）：以前这里写死 10，
+    #   用户改 position.max_daily_signals 只改了界面文案，实际仍是 10 只。
+    limit_n = int(core.CFG.get("max_daily_signals") or 10)
+    cand = core.pick_candidates(data, target, limit=limit_n)
     n_sig_all = len(core.signal_rows(data, target, board_only=False))
     n_sig_mb = len(core.signal_rows(data, target, board_only=True))
     rows = cand.to_dict("records") if not cand.empty else []
