@@ -190,6 +190,25 @@ def open_path(p: str):
 
 
 # ---------------------------------------------------------------- 任务
+def busy_tasks() -> list[str]:
+    """当前**确实在跑**的任务（跨进程可见，查库里的 running 记录）。
+
+    ★★ 为什么控制台也必须查（2026-09-18 修复）：
+      网页侧早就做了双向互斥（`/api/tasks/<key>/run` 会查 has_running_task），
+      但控制台走的是 `tasks.run_task`，而它只挡「同一个任务重复执行」——
+      `key in db.has_running_task()`，跑 A 的时候再跑 B 完全放行。
+      于是：先在控制台点「盘后任务」（20~25 分钟、会重写全部 5017 个 CSV），
+      中途再点「盘中任务」→ 盘中扫描一边读、盘后一边重写同一批文件，
+      可能读到写了一半的 CSV，扫描结果莫名少一批股票，而日志上毫无异常。
+      这里按网页侧同样的口径挡一道（多任务一律互斥）。
+    """
+    try:
+        import db as _db
+        return list(_db.has_running_task())
+    except Exception:
+        return []
+
+
 def run_task_cli(key: str):
     sys.path.insert(0, HERE)
     try:
@@ -199,6 +218,16 @@ def run_task_cli(key: str):
         print(col(f"  ✘ 载入任务模块失败：{e}", "r"))
         return
     info = tasks.TASK_DEFS[key]
+    names = {"premarket": "盘前任务", "intraday": "盘中任务", "postmarket": "盘后任务"}
+    busy = busy_tasks()
+    if busy:
+        print()
+        print(col("  ⚠ 有任务正在执行，已拒绝启动："
+                  + "、".join(names.get(k, k) for k in busy), "y"))
+        print(col("     等它跑完再来。两个任务同时跑会互相踩数据"
+                  "（盘后任务要重写全部 5017 个 CSV，"
+                  "盘中/盘前正在读它们），结果可能莫名其妙地少一批股票。", "dim"))
+        return
     print()
     print(col(f"  ▶ 开始执行「{info['name']}」", "bd"))
     if key == "postmarket":

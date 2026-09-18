@@ -96,11 +96,40 @@ def load_config() -> dict:
         bs = j.get("board_scope", {})
         if bs.get("main_board_only") is not None:
             cfg["main_board_only"] = bool(bs["main_board_only"])
+        # ★ 上市天数门槛从配置读（原本漏读，只靠 DEFAULTS 里的 60 兜着，
+        #   用户在 universe.min_listed_days 里改成别的值不生效）。
+        #   ⚠️ 取一次存进变量再用：写 `if un.get(A): cfg[x] = int(un[A])` 时
+        #      两个键名只要有一个打错，就是 KeyError → 被下面的 except 吞掉 →
+        #      **整份配置静默回落成默认值**（本次就踩了：校验写 min_listed_days、
+        #      取值写 min_list_days，门槛/门槛主板全部悄悄变回默认）。
+        un = j.get("universe", {}) or {}
+        mld = un.get("min_listed_days")
+        if mld:
+            cfg["min_list_days"] = int(mld)
         tmm = (rg.get("presets", {}).get(key, {}) or {}).get("threshold_main_board")
         if tmm:
             cfg["breadth_threshold_main"] = int(tmm)
     except Exception as e:
         print(f"[config] 读取失败，使用默认值：{e}")
+    # ★ 参数健全性：这几个值一旦被填成 0 / 负数，计算会静默产出垃圾
+    #   （bias_period=0 → 均线除零；min_list_days 为负 → 门槛形同不存在）。
+    #   宁可回落到安全默认值并明确告警，也不要带着坏参数往下跑。
+    #   ★★ 这里**必须区分整数与浮点**（2026-09-18 修）：
+    #      旧写法一律 int(cfg[k]) 去比，而 vol_surge 的正常区间是 (0, 10]——
+    #      任何小于 1 的合法值（0.5 倍量、甚至 1.5）都被 int() 截成 0，
+    #      于是 0 < 0.01 成立 → 被判为"不合理" → **静默回落成默认 1.5**。
+    #      用户把放量倍数调松到 0.8 倍，实际跑的还是 1.5 倍，界面上也不显示这个数。
+    for k, lo, cast in (("bias_period", 2, int), ("vol_surge", 0.01, float),
+                        ("min_list_days", 0, int), ("min_amount", 1, float),
+                        ("workers", 1, int), ("retry", 1, int)):
+        try:
+            if cast(cfg[k]) < lo:
+                print(f"[config] ⚠️ {k}={cfg[k]} 不合理（应 ≥ {lo}），已回落到默认 "
+                      f"{DEFAULTS[k]}")
+                cfg[k] = DEFAULTS[k]
+        except Exception:
+            print(f"[config] ⚠️ {k}={cfg.get(k)!r} 不是数字，已回落到默认 {DEFAULTS[k]}")
+            cfg[k] = DEFAULTS[k]
     return cfg
 
 
@@ -473,7 +502,23 @@ def job_one(code: str, expect_date: str | None = None):
     if d is None:
         return code, None
     p = os.path.join(DATA_DIR, f"{code}.csv")
-    d.to_csv(p, index=False, encoding="utf-8-sig")      # 陈旧数据也先落盘，总比没有好
+    # ★ 原子落盘：先写同目录临时文件，再 os.replace 替换（同盘替换是原子操作）。
+    #   直接 to_csv 到目标路径的话，进程一旦在写的中途被强杀 —— 或抓取超时后
+    #   `ex.shutdown(wait=False)` 不再等待这个线程 —— 就会留下半截文件；
+    #   而盘中扫描是逐只读文件**尾部字节**的，读到半行会解析失败 → 该股被静默跳过。
+    #   临时文件用 .tmp 后缀，不会命中 load_dataset / 基准构建的 *.csv 通配。
+    tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        d.to_csv(tmp, index=False, encoding="utf-8-sig")
+        os.replace(tmp, p)                  # 陈旧数据也先落盘，总比没有好
+    except Exception as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        print(f"  ⚠️ {code} 落盘失败：{type(e).__name__}: {e}", flush=True)
+        return code, None
     if expect_date:
         try:
             latest = str(pd.to_datetime(d["date"], errors="coerce").max().date())
@@ -565,7 +610,25 @@ def signal_mask(d: pd.DataFrame) -> pd.Series:
 
 # ------------------------------------------------------------------ 广度 / 候选股
 def latest_trade_date(data: pd.DataFrame) -> pd.Timestamp:
-    return data["date"].max()
+    """数据集里的「最新交易日」。
+
+    ★ 为什么要夹掉未来日期（2026-09-18 修复）：
+      只要**任意一只**股票的 CSV 里混进一个未来日期（数据源脏数据 / 抓取异常
+      / 手工改过文件），`max()` 就会一步跳到那一天。而那天通常只有 1 只股票，
+      于是 `stocks_total` 变成 1 → 撞上 updater 的「覆盖率 ≥90%」闸门 →
+      **整个盘后任务被判为"数据不完整"并拒绝写库**，用户白等 20 分钟。
+      真实交易日不可能晚于今天，所以这里直接把晚于今天的日期排除在候选之外。
+      都不合法时（系统时钟异常）退回原来的行为，绝不因此抛错。
+    """
+    d = data["date"]
+    try:
+        today = pd.Timestamp(datetime.now().date())
+        ok = d[d <= today]
+        if not ok.empty:
+            return ok.max()
+    except Exception:
+        pass
+    return d.max()
 
 
 def calc_breadth(data: pd.DataFrame, date: pd.Timestamp | None = None) -> dict:
@@ -692,12 +755,15 @@ def _parse_tencent(txt: str) -> dict:
         if len(f) < 35:
             continue
         try:
-            price = float(f[3])
+            raw_price = float(f[3])
             prev = float(f[4] or 0)
         except Exception:
             continue
-        if price <= 0:                            # 停牌/无成交 → 用昨收
-            price = prev
+        # ★ 记住"这一只其实没有成交"（停牌/未开盘）。price 用昨收兜底只是为了
+        #   让持仓估值不至于变成 0，但**绝不能**拿它去算当日的乖离率 ——
+        #   盘中扫描必须靠这个标志把停牌股剔掉（见 intraday_scan）。
+        suspended = raw_price <= 0
+        price = prev if suspended else raw_price
         t = f[30]
         # ★ 盘中扫描需要的额外字段（腾讯快照下标已实测确认）：
         #   [36] 成交量(手)   [57] 成交额(万元，精确)   [38] 换手率(%)
@@ -711,7 +777,7 @@ def _parse_tencent(txt: str) -> dict:
             code=code6, name=f[1],
             date=f"{t[0:4]}-{t[4:6]}-{t[6:8]}" if len(t) >= 8 else "",
             time=f"{t[8:10]}:{t[10:12]}" if len(t) >= 12 else "",
-            close=price, prev=prev,
+            close=price, prev=prev, suspended=suspended,
             open=float(f[5] or 0), high=float(f[33] or 0), low=float(f[34] or 0),
             change_pct=float(f[32] or 0), source="腾讯",
             vol_hand=_f(36),                       # 当日累计成交量（手）
@@ -738,15 +804,16 @@ def _parse_sina(txt: str) -> dict:
         if len(f) < 32 or not f[0]:
             continue
         try:
-            price = float(f[3])
+            raw_price = float(f[3])
             prev = float(f[2] or 0)
         except Exception:
             continue
-        if price <= 0:
-            price = prev
+        # 同 _parse_tencent：停牌/无成交要用标志记下来，不能靠"价格等于昨收"去猜
+        suspended = raw_price <= 0
+        price = prev if suspended else raw_price
         out[code6] = dict(
             code=code6, name=f[0], date=f[30], time=(f[31] or "")[:5],
-            close=price, prev=prev,
+            close=price, prev=prev, suspended=suspended,
             open=float(f[1] or 0), high=float(f[4] or 0), low=float(f[5] or 0),
             change_pct=round((price - prev) / prev * 100, 2) if prev else 0.0,
             source="新浪")
@@ -832,49 +899,232 @@ def time_progress(h: int | None = None, m: int | None = None) -> float:
 
 
 # ---- 盘中基准（每只股票「今日之前」的那部分日线）----
-# 字段：前 23 根收盘价之和（配今日实时价推 MA24）、前 4/5 日成交量之和、5 日前收盘价、上市天数
-_BASE_CSV = os.path.join(DATA_DIR, "_intraday_base.csv")
-_BASE_META = os.path.join(DATA_DIR, "_intraday_base.json")
-_BASE_COLS = ["code", "name", "data_date", "n_prior", "sum23", "sum_v4", "sum_v5",
-              "close5", "last_close"]
+# 字段：前 (周期-1) 根收盘价之和（配今日实时价推 MA）、前 4/5 日成交量之和、
+#       5 日前收盘价、上市天数
+#
+# ★★ 为什么是**两个**缓存文件而不是一个（2026-09-18）：
+#   基准只有两种语义，取决于「本地日线里最后一根 K 线，算不算历史」：
+#     all  —— 全部 K 线都算「今日之前」。适用于**次日照常交易**的时刻
+#             （那天的新 K 线还没发布，所以尾部最后一根确实是历史）。
+#     skip —— 排除最后一根。适用于**扫描日那根 K 线已经落在本地**的时刻
+#             （当天盘后任务跑过 / 数据源已经发布当日日线）。若不排除，
+#             它会被当成"今日之前"的历史，与实时价**重复**计进均线：
+#             MA 偏大偏小、BIAS 跟着错，而且看起来完全正常。
+#   盘后任务落完当日 K 线后两边都需要（当晚看一次 = skip；次日盘中 = all），
+#   所以预建时两份都写。只写一份的话，另一种口径会判定"不符"→ 重建，
+#   而重建会把缓存换成那一种 —— 次日 14:30 又要再重建一次，
+#   那一次很可能是**冷启动（实测 160 秒）**，用户就干等两分半。
+#   两份都建的成本只是多读一遍文件尾部（盘后任务刚写过，热度还在，实测 3~6 秒）。
+_BASE_MODES = ("all", "skip")
+_BASE_COLS = ["code", "name", "data_date", "csv_last", "n_prior", "sum_prior",
+              "sum_v4", "sum_v5", "close5", "last_close"]
 # ★ 缓存结构版本号。**改了 _BASE_COLS 就必须 +1**：否则旧缓存里没有新列，
 #   读进来全是 NaN，量比会静默变成 0（不报错、不崩溃，只是结果全错）。
-_BASE_SCHEMA = "v2"
+#   v3：sum23 → sum_prior（周期不再硬编码），并新增 fingerprint / period 元数据。
+#   v4：单一缓存文件 → **按口径分文件**（all / skip），并开始校验 cache_mode。
+_BASE_SCHEMA = "v4"
+
+
+def _base_paths(mode: str) -> tuple[str, str]:
+    """口径 → (缓存 CSV, 元数据 JSON) 路径。
+
+    ★ 文件名里的口径只可能就是 all / skip 两个值 —— 不要拿「扫描日」「9999-12-31」
+      这种日期当文件名：那会每天生成一对新文件，data_long 里越堆越多。
+      而且仔细想，"扫描日那根要排除"这个语义与具体是哪一天无关：
+      它永远等于「跳过尾部最后一根」。所以只有两种，两个文件。
+    """
+    safe = mode if mode in _BASE_MODES else "all"
+    return (os.path.join(DATA_DIR, f"_intraday_base.{safe}.csv"),
+            os.path.join(DATA_DIR, f"_intraday_base.{safe}.json"))
+
+
+# 旧版单文件缓存的名字。新的两份写法没有 `_intraday_base.csv` 了，
+# 留着它只会让人误以为那是生效中的缓存 —— 落盘时顺手清掉。
+_BASE_LEGACY = (os.path.join(DATA_DIR, "_intraday_base.csv"),
+                os.path.join(DATA_DIR, "_intraday_base.json"))
+
 # 哨兵日期：当作「今天在很远的未来」→ 尾部每一根 K 线都算「今日之前」。
 # 用途见 intraday_base：让基准只随「数据内容」变化，从而跨天复用。
 _ALL_BARS = "9999-12-31"
 
 
-def save_intraday_base(recs: list[dict], cache_key: str = "") -> None:
-    """把盘中基准落盘。
+def _data_fingerprint() -> str:
+    """本地日线目录的轻量指纹："文件数|最新 mtime(ns)"。
 
-    ★ cache_key 见 intraday_base：f"{本地数据最新交易日}|{生效口径}"。
-      · 本地数据前进了一天（跑了盘后任务）→ 基准必须跟着前移
-      · 口径从 "all" 变成具体扫描日（当天盘后已跑）→ 也必须重建
+    ★★ 为什么缓存键必须挂在这个指纹上，而不是挂「库里记录的数据日期」：
+      `updater.py` 的完整性闸门会在下载不完整时**拒绝写库** ——
+      于是会出现「CSV 已经前进到 D 日，而库里仍停在 D-1 日」。
+      若缓存键用库里的日期，第二天盘中算出来的键和昨天**一模一样**，
+      于是命中一份「止于 D-1」的旧基准：MA24 少一天、Chg5D 错一天、
+      量比错一天，全都静默算错，日志上看不出任何异常。
+      （2026-09-17 那次半份数据事故就是这个组合。）
+      挂指纹后：CSV 内容一变，键就变，缓存自动作废重建。
+
+    成本：一次 listdir + 5019 次 stat，实测 20~60ms，相对基准构建可忽略。
+    """
+    n, mx = 0, 0
+    try:
+        for fn in os.listdir(DATA_DIR):
+            if not fn.endswith(".csv") or fn.startswith("_"):
+                continue
+            n += 1
+            try:
+                t = os.stat(os.path.join(DATA_DIR, fn)).st_mtime_ns
+                if t > mx:
+                    mx = t
+            except OSError:
+                pass
+    except Exception:
+        return ""
+    return f"{n}|{mx}"
+
+
+def save_intraday_base(recs: list[dict], mode: str = "all",
+                       csv_latest: str = "", fingerprint: str = "") -> None:
+    """把某一口径的盘中基准落盘（口径见 _base_paths 上方的说明）。
 
     ⚠️ 重建耗时**严重依赖系统文件缓存**：热缓存 2.9 秒，冷启动（每天第一次）
        **160.2 秒** —— 5006 个文件逐个 open/seek，实测 2026-09-17。
        「一天才一次、3 秒而已」是错的，这曾经让用户每天白等 2 分半。
        所以现在由盘后任务在数据落地时顺手重建（那时文件刚写过），
        盘中扫描只读缓存。
+
+    csv_latest / fingerprint / mode 一并写进 meta：
+      · fingerprint —— 判断"CSV 内容有没有变过"的唯一依据（见 _data_fingerprint）
+      · csv_latest  —— 这批 CSV 里最后一根 K 线的日期，用于判断"今天的K线到没到"
+      · mode        —— all（尾部全部 K 线都算历史，可跨天复用）
+                       / skip（排除尾部最后一根）
+        ★ 这个字段**读缓存时必须校验**。以前它写了却没人读，
+          于是盘后预建的 all 口径会被次日之外的"当晚再扫一次"直接命中：
+          MA(n) 少一天/多一天，BIAS 跟着偏，界面上还写着"已收盘，等同收盘口径"。
     """
+    csv_p, meta_p = _base_paths(mode)
     try:
         df = pd.DataFrame(recs, columns=_BASE_COLS)
-        df.to_csv(_BASE_CSV, index=False, encoding="utf-8")
-        with open(_BASE_META, "w", encoding="utf-8") as f:
-            json.dump(dict(cache_key=cache_key, n=len(df),
+        df.to_csv(csv_p, index=False, encoding="utf-8")
+        with open(meta_p, "w", encoding="utf-8") as f:
+            json.dump(dict(cache_key=f"{_BASE_SCHEMA}|{fingerprint}|{mode}",
+                           fingerprint=fingerprint, csv_latest=csv_latest,
+                           cache_mode=mode, period=int(CFG["bias_period"]),
+                           n=len(df),
                            built_at=datetime.now().isoformat(timespec="seconds")), f)
+        # 旧版单文件缓存清掉：它不再生效，留着只会误导（见 _BASE_LEGACY）
+        for old in _BASE_LEGACY:
+            try:
+                if os.path.exists(old):
+                    os.remove(old)
+            except OSError:
+                pass
     except Exception as e:
         print(f"[intraday_base] 落盘失败：{e}")
 
 
-def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | None:
+def _cached_csv_latest() -> str:
+    """从两份缓存的 meta 里读出「CSV 里最后一根 K 线的日期」，取较大者。
+
+    intraday_base 用它来判断"今天的 K 线到没到本地"，从而决定该用哪个口径 ——
+    在**读缓存之前**就要知道这个答案（否则得先花 3~160 秒建一遍才知道）。
+    取较大者而不是只看 all：两份都可能只有一个存在（首次使用、或刚清过缓存）。
+
+    这里只是**提示**，不是信任来源：缓存能不能用，最终仍由指纹 + 周期 +
+    版本号 + 口径四项校验把关（见 _load_base）。
+    """
+    best = ""
+    for m in _BASE_MODES:
+        meta_p = _base_paths(m)[1]
+        try:
+            with open(meta_p, encoding="utf-8") as f:
+                d = json.load(f) or {}
+        except Exception:
+            continue
+        v = str(d.get("csv_latest") or "")
+        if v > best:
+            best = v
+    return best
+
+
+def _load_base(mode: str, day: str, n: int, fp: str, log) -> dict | None:
+    """尝试读某一口径的缓存。四项校验全过才返回，否则返回 None（→ 调用方重建）。
+
+    ★ 四项缺一不可（第 4 项是 2026-09-18 补的，这一条真会算错数）：
+      1. 版本号 _BASE_SCHEMA —— 缓存结构变了（新增列等）必须作废，
+         否则旧缓存缺列 → 读进来是 NaN → 量比静默变 0，不报错、只是全错。
+      2. 数据指纹 —— CSV 内容变过就作废（见 _data_fingerprint）。
+      3. 乖离率周期 —— 用户把 bias_period 从 24 改掉后，收盘口径立刻跟着变，
+         而旧基准还是 24 天的，两条路径静默对不上。
+      4. **统计口径** —— all / skip 不能混用（见 _base_paths 上方的说明）。
+         以前只校验前 3 项，第 4 项写了却不读：盘后预建的 all 缓存会被
+         "当日 K 线已落地之后的盘中扫描"直接命中，等于把今日这根既算作历史、
+         又当成实时价，重复计进均线。数字偏了，界面却写着"等同收盘口径"。
+    """
+    csv_p, meta_p = _base_paths(mode)
+    if not (os.path.exists(csv_p) and os.path.exists(meta_p)):
+        return None
+    try:
+        with open(meta_p, encoding="utf-8") as f:
+            meta = json.load(f) or {}
+    except Exception as e:
+        log(f"[盘中] 基准缓存元数据损坏（{e}）→ 重建")
+        return None
+    if not meta:
+        return None
+
+    cached_mode = str(meta.get("cache_mode") or "")
+    schema_ok = str(meta.get("cache_key") or "").split("|")[0] == _BASE_SCHEMA
+    fp_ok = bool(fp) and str(meta.get("fingerprint") or "") == fp
+    n_ok = int(meta.get("period") or 0) == n
+    mode_ok = (cached_mode == mode)
+    latest = str(meta.get("csv_latest") or "")
+
+    if not schema_ok:
+        log(f"[盘中] 基准缓存版本过旧（{meta.get('cache_key') or '?'}）→ 重建")
+        return None
+    if not n_ok:
+        log(f"[盘中] 乖离率周期已改为 {n}（缓存是 {meta.get('period')}）→ 重建")
+        return None
+    if not mode_ok:
+        log(f"[盘中] 基准缓存口径是 {cached_mode or '?'}，现在需要 {mode} → 重建")
+        return None
+    if not fp_ok:
+        log("[盘中] 本地日线文件有变动 → 基准重建")
+        return None
+    try:
+        df = pd.read_csv(csv_p, dtype={"code": str})
+        # 双保险：万一缓存被旧版本写过（列不全），宁可重建也不要带着
+        # NaN 往下走 —— 量比会静默变成 0，不报错、只是结果全错。
+        missing = [c for c in _BASE_COLS if c not in df.columns]
+        if missing:
+            log(f"[盘中] 基准缓存缺列 {missing} → 重建")
+            return None
+        df["code"] = df["code"].str.zfill(6)
+        log(f"[盘中] 基准命中缓存（口径 {mode}）：{len(df)} 只"
+            f"（日线止于 {latest or '?'}，建于 {meta.get('built_at')}）")
+        return {r["code"]: r for r in df.to_dict("records")}
+    except Exception as e:
+        log(f"[盘中] 基准缓存读取失败（{e}）→ 重建")
+        return None
+
+
+def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192,
+                       n: int | None = None) -> dict | None:
     """只读 CSV **尾部**，拿到该股「今日之前」的基准指标。
 
     ★ 为什么不用 load_dataset：全量汇总要读 1578 万行、约 4 分钟，
       而盘中每日都要算一次，必须压到秒级。每只股票只需要最后 24 行，
       所以按字节 seek 到文件尾部读取即可（快两个数量级）。
+
+    n：乖离率周期（默认取配置的 bias_period）。
+      ⚠️ 以前这里把 23、24 两个数字**硬编码**在函数里，于是用户把
+         bias_period 从 24 改成别的值之后，收盘口径（compute_features 用 rolling(n)）
+         立刻跟着变，而盘中口径仍然是 24 天 —— 两条路径静默对不上，
+         盘中清单和盘后清单会给出不同的股票。现在周期只从这一个入口取。
     """
+    n = int(n or CFG["bias_period"])
+    # ★ 尾部读取窗口必须随周期一起放大：原来固定读 40 行 / 8192 字节，
+    #   是照着 24 天周期定的。周期一旦调大（比如 60 天），
+    #   拿到的 prior 根数不够，全部股票都会 return None →
+    #   基准变空 → 盘中扫描报"本地还没有可用的日线数据"，形同工具坏了。
+    n_bytes = max(int(n_bytes), (n + 30) * 130)
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as f:
@@ -893,9 +1143,20 @@ def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | Non
     rows = list(_csv.reader(_io.StringIO("\n".join(lines))))
     if not rows:
         return None
+    # ★ 防御：按字节截断读出来的第一行可能只剩残缺字段（甚至空）。
+    #   早前这里是一个裸的 `rows[0][0]` —— 一旦越界就抛 IndexError，
+    #   而异常会穿透到 intraday_base 的调用方，把整只股票静默跳过；
+    #   数量一多就表现为"广度偏低"，日志上完全看不出是解析崩了。
     idx = None
-    if not re.match(r"^\d{4}-\d{2}-\d{2}", (rows[0][0] or "").strip()):
-        idx = {c.strip().lstrip("\ufeff"): i for i, c in enumerate(rows[0])}
+    try:
+        head = (rows[0][0] or "").strip()
+    except (IndexError, TypeError):
+        head = ""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}", head):
+        try:
+            idx = {c.strip().lstrip("\ufeff"): i for i, c in enumerate(rows[0])}
+        except Exception:
+            idx = None
         rows = rows[1:]
     rows = [r for r in rows if r and len(r) >= 6]
     if not rows:
@@ -904,7 +1165,9 @@ def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | Non
     i_c = (idx or {}).get("close", 4)
     i_v = (idx or {}).get("volume", 5)
     recs = []
-    for r in rows[-40:]:
+    # ★ 窗口随周期放大：原来固定取最后 40 行是照 24 天周期定的，
+    #   周期调大后 prior 根数不足会让**所有**股票 return None（基准变空）。
+    for r in rows[-max(40, n + 16):]:
         try:
             dt = str(r[i_d])[:10]
             if not re.match(r"^\d{4}-\d{2}-\d{2}", dt):
@@ -913,9 +1176,9 @@ def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | Non
         except Exception:
             continue
     prior = [x for x in recs if x[0] < today]
-    # ★ 收盘口径 ma = rolling(24, min_periods=24)，今日有值只需「今日之前 ≥ 23 根」。
-    #   写成 ≥24 会多卡掉一整档股票，与盘后结果对不齐。
-    if len(prior) < CFG["bias_period"] - 1:
+    # ★ 收盘口径 ma = rolling(n, min_periods=n)，今日有值只需「今日之前 ≥ n-1 根」。
+    #   写成 ≥n 会多卡掉一整档股票，与盘后结果对不齐。
+    if len(prior) < n - 1:
         return None
     # 上市交易日数：尾部读不到总行数，得整文件数一遍。
     #   ⚠️ 旧写法先用「89 字节/行」估算、只在估算 <260 时才精算 —— 但老股票早年
@@ -938,8 +1201,16 @@ def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | Non
     # ★★ sum_v4 / sum_v5 是"量"而不是"均量"：量比的分母窗口要和收盘口径对齐，
     #    而收盘用的是 rolling(5)（**含当日**），当日那根在盘中只能用"预测量"代替，
     #    所以必须留成"和"让推演阶段自己拼分母（详见 intraday_scan 的注释）。
-    return dict(data_date=prior[-1][0], n_prior=int(n_prior),
-                sum23=round(float(sum(cl[-23:])), 4),
+    #
+    # ★ csv_last 与 data_date 是**两件事**，必须分开记（2026-09-18）：
+    #   data_date = 口径窗口里最后一根的日期（skip 口径下会比 CSV 少一天）
+    #   csv_last  = 这个文件里**真实**的最后一根日期，与口径无关
+    #   以前只记 data_date 并把它当 csv_latest 交给下游，于是 skip 口径的缓存
+    #   会宣称"CSV 止于昨天"，下一次扫描就会误判成"今天的 K 线还没到" →
+    #   用错口径、或者白白多重建一遍。
+    return dict(data_date=prior[-1][0], csv_last=recs[-1][0],
+                n_prior=int(n_prior),
+                sum_prior=round(float(sum(cl[-(n - 1):])), 4),
                 sum_v4=round(float(sum(vo[-4:])), 2),
                 sum_v5=round(float(sum(vo[-5:])), 2),
                 close5=round(float(cl[-5]), 4),
@@ -948,84 +1219,119 @@ def _metrics_from_tail(path: str, today: str, n_bytes: int = 8192) -> dict | Non
 
 def intraday_base(data_date: str = "", force: bool = False, log=None,
                   scan_day: str = "", include_all: bool | None = None) -> dict:
-    """{code: 盘中基准}。优先读缓存，过期或缺失才重建。
+    """{code: 盘中基准}。优先读缓存，**只有真的变了才重建**。
 
-    ★★ 缓存键 = f"{数据日期}|{生效口径}"，口径只有两种：
-      · "all" —— 扫描日 > 数据日期。**正常盘中就是这一种**：当天还没收盘，
-                 数据源也还没发布当日 K 线，于是「今日之前」= CSV 尾部全部 K 线，
-                 基准**只取决于 CSV 内容**，因此可以跨天复用。
-      · 扫描日 —— 扫描日 ≤ 数据日期（当天盘后任务已经跑过、当日 K 线已入库）。
-                 此时必须把当日那根排除掉，不能复用 "all" 的结果。
+    ★★ 该用哪个口径，只由一个问题决定：**扫描日那根 K 线在不在本地？**
+      · 在（扫描日 ≤ 本地最后一根）→ skip：必须排除它，
+        否则它会既被当成"今日之前"的历史、又充当实时价，重复计进均线。
+      · 不在 → all：尾部每一根都是历史，这个结果还与"今天是哪天"无关，
+        所以可以跨天复用（次日盘中直接命中）。
+      · 调用方也可以明确指定：include_all=True（盘后预建，要的就是 all）／
+        include_all=False（明确排除最后一根）。
 
-    ★★ 为什么非这么掰不可（2026-09-17 实测）：
-       旧口径把扫描日**无条件**写进缓存键 → 每天第一次盘中扫描必然全量重建，
-       冷启动逐只打开 5006 个 CSV 要 **160.2 秒**（日志原话：
-       「基准建立完成：5006 只，耗时 160.2 秒」），而热缓存只要 2.9 秒。
-       这 160 秒正是用户 14:30 点完「立即执行」后干等的时间。
-       改成 "all" 之后基准随「数据落地」而变（由盘后任务顺手重建，见 updater），
-       盘中扫描直接命中缓存。
+    ★★ 判据来自缓存 meta 里的 csv_latest，**不看库里的数据日期**：
+       `updater.py` 的完整性闸门在下载不完整时**拒绝写库**，于是会出现
+       「CSV 已前进到 D 日、库里仍停在 D-1 日」。若按库里日期判断，
+       会得出"今天的 K 线还没到" → 用 all 口径 → 把今日那根重复计进均线。
+       （2026-09-17 半份数据事故就是这一类组合：数字偏了，日志一片正常。）
+       缓存不存在时（首次运行 / 刚清过）走"先建 all、发现已含当日再改 skip"。
+
+    ★★ 速度：冷启动逐只读 5006 个 CSV 要 160.2 秒（2026-09-17 实测），
+       热缓存只要 2.9 秒。所以由盘后任务在数据落地时顺手预建（见 updater，
+       两个口径都建），盘中扫描几乎总能命中缓存。
     """
     log = log or (lambda s: None)
     day = scan_day or datetime.now().strftime("%Y-%m-%d")
-    if include_all is None:            # None = 按扫描日自动判断；True/False = 强制
-        include_all = day > (data_date or "")
-    key = f"{_BASE_SCHEMA}|{data_date or ''}|{'all' if include_all else day}"
-    if not force and os.path.exists(_BASE_CSV) and os.path.exists(_BASE_META):
-        try:
-            with open(_BASE_META, encoding="utf-8") as f:
-                meta = json.load(f)
-            if str(meta.get("cache_key") or "") == key:
-                df = pd.read_csv(_BASE_CSV, dtype={"code": str})
-                # ★ 双保险：万一缓存文件被旧版本写过（列不全），宁可重建也不要带着 NaN 往下走
-                missing = [c for c in _BASE_COLS if c not in df.columns]
-                if missing:
-                    log(f"[盘中] 基准缓存缺列 {missing} → 重建")
-                else:
-                    df["code"] = df["code"].str.zfill(6)
-                    return {r["code"]: r for r in df.to_dict("records")}
-            else:
-                log(f"[盘中] 基准缓存键 {meta.get('cache_key')} ≠ {key} → 重建")
-        except Exception as e:
-            log(f"[盘中] 基准缓存不可用（{e}），改为重建")
+    n = int(CFG["bias_period"])
+    fp = _data_fingerprint()
 
-    log("[盘中] 正在建立盘中基准（逐只读取最近 24 根日线）…")
-    t0 = time.time()
-    out = {}
-    files = [f for f in glob.glob(os.path.join(DATA_DIR, "*.csv"))
-             if not os.path.basename(f).startswith("_")]
-    # ★ 用哨兵当作「今天」→ 尾部所有 K 线都算「今日之前」。
-    #   已验证与「扫描日 > 数据日期」时的现口径逐字段完全等价（600 只抽样零差异）。
-    eff_today = _ALL_BARS if include_all else day
-    names = load_names()
-    for f in files:
-        code = os.path.basename(f)[:-4]
-        if not code.isdigit():
-            continue
-        m = _metrics_from_tail(f, eff_today)
-        if m:
-            out[code] = dict(code=code, name=names.get(code, ""), **m)
+    # ---- 决定口径 ----
+    if include_all is True:
+        need = "all"
+    elif include_all is False:
+        need = "skip"
+    else:
+        hint = _cached_csv_latest()
+        need = "skip" if (hint and day <= hint) else "all"
+
+    # ---- 读缓存 ----
+    if not force:
+        got = _load_base(need, day, n, fp, log)
+        if got is not None:
+            return got
+        # 缓存不可用时，若手上没有任何 csv_latest 提示，说明两份缓存都没有 ——
+        # 这时才知道"今天的 K 线到没到"，所以下面的自纠分支仍然必要。
+
+    def _build(eff_today: str) -> tuple[dict, str]:
+        """按指定口径重建，返回 ({code: 基准}, CSV 里**真实**最后一根 K 线的日期)。"""
+        t0 = time.time()
+        got: dict = {}
+        latest = ""
+        names = load_names()
+        files = [f for f in glob.glob(os.path.join(DATA_DIR, "*.csv"))
+                 if not os.path.basename(f).startswith("_")]
+        for f in files:
+            code = os.path.basename(f)[:-4]
+            if not code.isdigit():
+                continue
+            m = _metrics_from_tail(f, eff_today, n=n)
+            if not m:
+                continue
+            got[code] = dict(code=code, name=names.get(code, ""), **m)
+            # ★ 用 csv_last 而不是 data_date：后者在 skip 口径下会比 CSV 少一天
+            #   （因为最后一根被排除在外），拿它当"本地数据到哪了"会误判。
+            d = str(m.get("csv_last") or m.get("data_date") or "")
+            if d > latest:
+                latest = d
+        log(f"[盘中] 基准建立完成（口径 {need}）：{len(got)} 只，"
+            f"耗时 {time.time()-t0:.1f} 秒，日线止于 {latest or '?'}")
+        return got, latest
+
+    # ---- 重建 ----
+    out, csv_latest = _build(day if need == "skip" else _ALL_BARS)
+    # ★ 自纠：本次按 all 口径建的，但建完才发现本地日线里**已经含扫描日那根**
+    #   （当天盘后任务跑过 / 数据源已发布当日日线）→ 必须排除那根重建。
+    #   显式传 include_all=True 的调用方（盘后预建）跳过这一步：它要的就是 all。
+    if need == "all" and include_all is None and csv_latest and day <= csv_latest:
+        log(f"[盘中] 本地日线已含 {day}（最新 {csv_latest}）→ 排除当日那根后重建")
+        out, csv_latest = _build(day)
+        need = "skip"
+
     if out:
-        save_intraday_base(list(out.values()), key)
-    log(f"[盘中] 基准建立完成：{len(out)} 只，耗时 {time.time()-t0:.1f} 秒")
+        save_intraday_base(list(out.values()), mode=need,
+                           csv_latest=csv_latest, fingerprint=fp)
     return out
 
 
 def prebuild_intraday_base(data_date: str, log=None) -> int:
-    """盘后数据落地后，顺手把「all」口径的盘中基准重建好。返回只数（失败 -1）。
+    """盘后数据落地后，顺手把盘中基准的两个口径都建好。返回 all 口径的只数（失败 -1）。
 
     ★★ 为什么必须挪到这里来做（2026-09-17 实测）：盘中基准要逐只打开 5006 个
        CSV 读尾部，**冷启动 160.2 秒**、热缓存 2.9 秒。放在盘中任务里重建，
        就是用户 14:30 点完「立即执行」后干等两分半；放在这里，这些文件刚被
        更新器写过（还在系统文件缓存里，快得多），而且这段时间用户本来就在等
-       盘后任务（20~25 分钟），多几秒无感。预建好后次日盘中扫描直接命中缓存。
+       盘后任务（20~25 分钟），多几秒无感。
+
+    ★★ 为什么两个口径都要建（2026-09-18）：此刻当日 K 线刚落进本地，
+       于是**两个**后续需求同时成立 ——
+         · 当晚 / 夜里再看一眼（14:30 之外的时段）：当日 K 线在本地 → skip 口径
+         · 次日盘中（那天的新 K 线还没发布）→ all 口径
+       只建 all 的话：当晚那次扫描判定"口径不符"→ 重建 skip，缓存就此变成 skip；
+       接着次日 14:30 又判定"需要 all"→ 再重建一次，而**那一次很可能是冷启动
+       （160 秒）**，用户就盯着页面白等两分半。两份都建，两条路径都命中，
+       代价只是多读一遍文件尾部（热度还在，实测 3~6 秒；20~25 分钟的盘后任务里无感）。
     """
     log = log or (lambda s: None)
     try:
-        b = intraday_base(data_date=data_date, force=True, log=log, include_all=True)
-        log(f"[盘后] 盘中基准已预建 {len(b)} 只 —— 下次盘中扫描可直接命中缓存")
-        return len(b)
+        a = intraday_base(data_date=data_date, force=True, log=log, include_all=True)
+        # skip 口径：排除刚落地的那根当日 K 线。它只对"扫描日 = 当天"有意义，
+        # 而这里 data_date 正是当天 —— 所以恰好就是需要的那一份。
+        intraday_base(data_date=data_date, force=True, log=log, include_all=False)
+        log(f"[盘后] 盘中基准已预建 {len(a)} 只（all / skip 两个口径）"
+            f" —— 下次盘中扫描可直接命中缓存")
+        return len(a)
     except Exception as e:
-        # ★ 预建失败绝不能影响盘后任务本体：次日盘中扫描发现缓存键不匹配会自己重建，
+        # ★ 预建失败绝不能影响盘后任务本体：次日盘中扫描发现缓存不可用会自己重建，
         #   只是慢一点（160 秒），不会算错。
         log(f"[盘后] 盘中基准预建失败（不影响本次更新）：{type(e).__name__}: {e}")
         return -1
@@ -1047,9 +1353,28 @@ def fetch_live_quotes_bulk(codes: list[str], chunk: int = 300, workers: int = 6,
     import requests
 
     def one(cs):
-        r = requests.get(_RT_TENCENT + ",".join(cs), headers=_RT_HEADERS, timeout=15)
-        r.encoding = "gbk"
-        return _parse_tencent(r.text)
+        """单批快照。★ 失败的批次**必须重试**。
+
+        早前这里是裸的一次 requests.get，异常被上层 `except: pass` 吞掉 ——
+        一次抖动就静默丢掉 300 只，广度随之偏低，而日志上一片正常
+        （外层只有「总量 < 50%」的兜底，丢 1~2 批根本触发不了）。
+        现在单批最多试 3 次，全失败才放弃，并且**明确记一条日志**。
+        """
+        last = None
+        for attempt in range(3):
+            try:
+                r = requests.get(_RT_TENCENT + ",".join(cs),
+                                 headers=_RT_HEADERS, timeout=15)
+                r.encoding = "gbk"
+                got = _parse_tencent(r.text)
+                if got:
+                    return got
+                last = "返回空"
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"
+            time.sleep(0.5 * (attempt + 1))
+        log(f"[盘中] ⚠ 有 {len(cs)} 只的快照连续 3 次获取失败（{last}），本批已跳过")
+        return {}
 
     ex = ThreadPoolExecutor(max_workers=workers)
     futs = [ex.submit(one, cs) for cs in chunks]
@@ -1136,9 +1461,12 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
     log(f"[盘中] 拉取全市场实时快照（{len(all_codes)} 只）…")
     rt = fetch_live_quotes_bulk(all_codes, log=log)
     log(f"[盘中] 收到 {len(rt)} 只快照，耗时 {time.time()-t0:.1f} 秒")
-    if len(rt) < len(all_codes) * 0.5:
-        return dict(ok=False, msg=f"实时快照只取到 {len(rt)}/{len(all_codes)} 只，"
-                                  "网络异常，请稍后重试。")
+    # ★ 门槛 50% → 90%：腾讯一次就返回请求的全部代码，正常能拿到 99%+（差的几只
+    #   是无法识别的代码段）。丢 1~2 批（300~600 只）过不了旧门槛，却足以让
+    #   广度明显偏低 —— 那正是"静默算错"，比直接报错糟糕得多。
+    if len(rt) < len(all_codes) * 0.9:
+        return dict(ok=False, msg=(f"实时快照只取到 {len(rt)}/{len(all_codes)} 只"
+                                  f"（需 ≥90%），网络不稳。请稍后重试。"))
 
     # ---- 时间进度：以快照自带时间戳为准（收盘后自然就是 100%）----
     tcnt: dict = {}
@@ -1173,22 +1501,32 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
     hits, near = [], []            # ★ 主板口径（用户只看这些）
     hits_full = near_full = 0      # 全市场口径（与门槛 50 / 六年回测对照）
     n_scanned = 0
+    n_susp = 0                    # 停牌/无成交被跳过的只数（要报出来，不能静默）
     base_date = ""
     cmp_n = cmp_bad = 0            # 自算量比 vs 腾讯量比 的一致性自检
+    n_per = int(CFG["bias_period"])
     for code, q in rt.items():
         b = base.get(code)
         if not b:
             continue
+        # ★ 停牌 / 无成交：快照里的"最新价"其实是**昨收**（解析层用昨收兜的底）。
+        #   照常参与推演，就等于拿昨天的价格去算今天的乖离率，会把它算成
+        #   "跌得够深的近乖离率"塞进观察清单；而收盘口径里这类股票当天根本
+        #   没有行情行、压根不会出现。两边口径必须一致，所以这里跳过。
+        if q.get("suspended"):
+            n_susp += 1
+            continue
         price = float(q.get("close") or 0)
         if price <= 0:
+            n_susp += 1
             continue
-        # ★ 最少 K 线数：收盘口径 ma = rolling(24, min_periods=24)，今日有值需要
-        #   「今日之前 ≥ 23 根」。写成 ≥24 会多卡掉 1 根，与盘后结果对不齐。
+        # ★ 最少 K 线数：收盘口径 ma = rolling(n, min_periods=n)，今日有值需要
+        #   「今日之前 ≥ n-1 根」。写成 ≥n 会多卡掉 1 根，与盘后结果对不齐。
         n_prior = int(b.get("n_prior") or 0)
-        if n_prior < CFG["bias_period"] - 1:
+        if n_prior < n_per - 1:
             continue
-        ma24 = (float(b["sum23"]) + price) / 24.0
-        if ma24 <= 0:
+        ma = (float(b.get("sum_prior") or 0) + price) / float(n_per)
+        if ma <= 0:
             continue
         n_scanned += 1
         bd = str(b.get("data_date") or "")
@@ -1225,7 +1563,7 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
                 if abs(est_vol / est_implied - 1) > 0.25:
                     cmp_bad += 1
 
-        bias = (price - ma24) / ma24 * 100
+        bias = (price - ma) / ma * 100
         if bias > CFG["bias_threshold"]:
             continue                                    # 乖离率都没达标，两类清单都不进
         c5 = float(b.get("close5") or 0)
@@ -1251,7 +1589,11 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
                    vol_ratio=(round(vol_ratio, 2) if vol_ratio is not None else None),
                    chg5d=(round(chg5d, 2) if chg5d is not None else None),
                    amount=round(amount, 0),
-                   turnover_pct=round(float(q.get("turnover_pct") or 0), 2),
+                   # ★ 换手率也按时间进度折算成**全日口径**：量比、成交额、预测量
+                   #   都是全日口径，只有这一项留着"至今"的口径，同一张卡上就混了
+                   #   两把尺子；用户拿去和收盘后的换手率对比会对不上，进而怀疑
+                   #   「是不是哪里算错了」。折算后与其余各项同尺。
+                   turnover_pct=round(float(q.get("turnover_pct") or 0) / prog, 2),
                    mv_total_yi=round(float(q.get("mv_total_yi") or 0), 2),
                    vol_ratio_rt=round(float(q.get("vol_ratio_rt") or 0), 2),
                    high=round(float(q.get("high") or 0), 3),
@@ -1273,10 +1615,27 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
             if mb:
                 near.append(rec)
 
+    # ★★ 覆盖率闸门（2026-09-18 新增）：
+    #   `base` 只覆盖"本地确实有日线"的股票。若因为盘后任务没跑完 / 下载中途
+    #   大面积失败 / CSV 目录本身缺文件，base 会变小 —— 命中数随之偏低，
+    #   而上面那道 `len(rt) < 50%` 的检查拦不住（它只看快照，不看本地日线）。
+    #   结果就是广度**静默偏低**：本该出手的日子被推演成"今天不动手"。
+    #   与 updater 的 90% 完整性闸门同源 —— 宁可明确报错让用户重跑，
+    #   也绝不给出一个看起来正常的错结论。
+    have = len(set(base) & set(all_codes))
+    cover = have / max(1, len(all_codes))
+    if cover < 0.9:
+        return dict(ok=False,
+                    msg=(f"本地日线只覆盖 {have}/{len(all_codes)} 只（{cover*100:.0f}%，"
+                         f"需要 ≥90%）。多半是「盘后任务」还没跑完、或上次下载没有下全。"
+                         f"请先到「盘后总结」页跑一次盘后任务，再回来刷新。"))
+
     hits.sort(key=lambda r: r["bias"])
     near.sort(key=lambda r: r["bias"])
     log(f"[盘中] 扫描 {n_scanned} 只：主板达标 {len(hits)} 只 / 仅乖离率符合 {len(near)} 只"
-        f"（全市场口径 {hits_full} / {near_full}；时间进度 {prog*100:.1f}%）")
+        f"（全市场口径 {hits_full} / {near_full}；时间进度 {prog*100:.1f}%；"
+        f"本地日线覆盖 {cover*100:.1f}%"
+        + (f"；停牌跳过 {n_susp} 只" if n_susp else "") + "）")
     if cmp_n:
         log(f"[盘中] 量比自检：{cmp_n} 只可比对，偏离>25% 的 {cmp_bad} 只"
             f"（{'正常' if cmp_bad < cmp_n * 0.05 else '⚠ 异常，请检查单位口径'}）")
@@ -1292,7 +1651,7 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         ok=True, scan_at=datetime.now().isoformat(timespec="seconds"),
         quote_date=quote_date, quote_time=q_time, session=session,
         base_date=base_date, progress=prog, early=early,
-        scanned=n_scanned, quotes=len(rt),
+        scanned=n_scanned, quotes=len(rt), suspended=n_susp, cover=round(cover, 4),
         vol_cmp=cmp_n, vol_bad=cmp_bad,
         # ★ 下游判断「自检是否真的跑过」要用这个，不要用 vol_bad==0：
         #   cmp_n=0 时 vol_bad 必然也是 0，那不是通过，是没测。
@@ -1309,6 +1668,10 @@ def intraday_scan(data_date: str = "", log=None, top: int = 30,
         threshold_main=CFG.get("breadth_threshold_main"),
         triggered_main=(bool(len(hits) >= CFG["breadth_threshold_main"])
                         if CFG.get("breadth_threshold_main") else None),
+        # ★ 下面两个清单是**截断**过的（只留前 top 只），而上面 breadth /
+        #   bias_only_total 是**全量计数**。前端必须知道这个上限，否则
+        #   「达标 96 只」与「表里 30 行」会互相打架，用户会以为程序漏了股票。
+        list_limit=top,
         candidates=hits[:top], bias_only=near[:top],
         bias_threshold=CFG["bias_threshold"], vol_surge=CFG["vol_surge"],
         min_amount=CFG["min_amount"], min_list_days=CFG["min_list_days"],

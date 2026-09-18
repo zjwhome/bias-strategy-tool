@@ -11,14 +11,17 @@
 <script>
 (function(){
   var PAL = {paper:'light', azure:'light', ink:'dark', carbon:'dark'};
-  var pref = '';
+  var pref = '', fromUrl = false;
   /* ① 地址栏参数优先：?theme=ink 可以直达某套配色，方便把常用的那套存成书签。
-        （旧写法 ?theme=light / ?theme=dark 一并认，落到同色系的第一套。） */
+        （旧写法 ?theme=light / ?theme=dark 一并认，落到同色系的第一套。）
+        ★ 但「地址栏指定」只是**这一次**的观感，不能写进 localStorage ——
+          否则用户点一下别人给的链接、或开一次自己的书签，就把他原本选好的
+          配色永久改掉了。后面 applyTheme 的首屏调用会带上 fromUrl 标记跳过写盘。 */
   try{
     var q = (new URLSearchParams(location.search).get('theme') || '').toLowerCase();
     if(q === 'light') q = 'paper';
     else if(q === 'dark') q = 'ink';
-    if(q && (q === 'auto' || PAL[q])) pref = q;
+    if(q && (q === 'auto' || PAL[q])){ pref = q; fromUrl = true; }
   }catch(e){}
   /* ② 其次是上次选的那套 */
   if(!pref){ try { pref = localStorage.getItem('bia_theme') || 'auto'; } catch(e){ pref = 'auto'; } }
@@ -31,6 +34,7 @@
   el.setAttribute('data-palette', pal);
   el.setAttribute('data-mode', PAL[pal]);
   el.setAttribute('data-theme-pref', pref);
+  el.setAttribute('data-theme-from-url', fromUrl ? '1' : '0');
 })();
 </script>
 <style>
@@ -206,7 +210,13 @@
   --on-brand:   oklch(16%  .022 248);    /* 亮蓝底上用深字，对比比白字更好看也更清楚 */
 
   --up:         oklch(64%  .175 26);     /* 旧版 67% 在深底上面积一大就刺眼，压到 64 */
-  --up-soft:    oklch(27%  .058 26);
+  /* ★ --up-soft 从 27% 压到 21%（2026-09-18 真机审计）：
+     它同时是 .pill.act / .banner.err / .stat.hot 的底色，而这三个地方的**文字**
+     就是 --up（64% 的红）。深色底 + 亮红字这一对，原值只有 4.21:1 ——
+     正文/小字要求 4.5，.pill.act 是 13px 的小字，属于**真的不达标**
+     （.stat.hot .v 是 21px 粗体，按"大字"3:1 判侥幸过关，但它是全页最重要的数字，
+      没道理让它停在 4.1）。压到 21% 后：字/底 4.9、说明小字/底 5.3。 */
+  --up-soft:    oklch(21%  .058 26);
   --up-ring:    oklch(64%  .175 26 / .38);
   --down:       oklch(66%  .120 160);
   --down-soft:  oklch(27%  .046 160);
@@ -245,7 +255,8 @@
   --on-brand:   oklch(15%  0   0);
 
   --up:         oklch(63%  .180 28);
-  --up-soft:    oklch(26.5% .058 28);
+  /* ★ 同 ink：26.5% → 19.8%，把「亮红字压深红底」这一对从 4.10 拉到 4.9（见 ink 段说明） */
+  --up-soft:    oklch(19.8% .058 28);
   --up-ring:    oklch(63%  .180 28 / .38);
   --down:       oklch(67%  .122 162);
   --down-soft:  oklch(26.5% .046 162);
@@ -455,7 +466,11 @@ td.code{font-family:var(--font-mono);font-size:var(--t-sm);letter-spacing:-.01em
 .up{color:var(--up);font-weight:600}
 .down{color:var(--down);font-weight:600}
 .mut{color:var(--ink-3)}
-.tbl-hint{display:none;margin:0 0 var(--s-2);font-size:var(--t-xs);color:var(--ink-3)}
+/* ★ 默认必须**可见**。原先是 display:none、只在窄屏媒体查询里改成 block，
+   于是桌面端唯一用到它的那句话被永远藏起来了：
+   「⚠ 广度未达门槛，以下仅为数据观察，不建议操作」——
+   正是最该被看到的风控提示，却只在手机上出现。 */
+.tbl-hint{display:block;margin:0 0 var(--s-2);font-size:var(--t-xs);color:var(--ink-3)}
 
 /* 持仓表：固定列宽 + 可横向滚动，保证长文本换行而不是把表格撑爆后裁掉 */
 table.cand{min-width:720px}
@@ -486,7 +501,11 @@ table.hold .days-over{color:var(--warn);font-weight:700}
 .del{border:0;background:none;color:var(--ink-3);font:inherit;font-size:var(--t-xs);
   cursor:pointer;padding:5px 8px;border-radius:var(--r-sm);
   transition:background-color var(--dur-1) var(--ease),color var(--dur-1) var(--ease)}
-@media (hover:hover){.del:hover{background:var(--up-soft);color:var(--up)}}
+/* ★ 悬停用**实红底 + 白字**，不用「软红底 + 红字」：
+   实测软红底配红字在 ink / carbon 两套深色主题里只有 4.21 / 4.10（WCAG AA 要 4.5），
+   浅色那两套才 5.3。实红底白字四套分别是 6.26/6.40/6.70/6.73，全部稳过，
+   而且"删除"用实红更贴合语义。 */
+@media (hover:hover){.del:hover{background:var(--up);color:var(--on-brand)}}
 
 /* ==========================================================================
    9 · 空状态（这套策略 95% 的时间都停在这里，必须像「有意为之」而不像「坏了」）
@@ -551,7 +570,11 @@ table.hold .days-over{color:var(--warn);font-weight:700}
 .stat .k{display:block;font-size:var(--t-xs);color:var(--ink-3);margin-bottom:2px}
 .stat .v{font-size:var(--t-xl);font-weight:750;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 .stat .u{font-size:var(--t-xs);color:var(--ink-3);margin-left:4px;font-weight:600}
-.stat.hot{background:var(--up-soft)}
+/* 「达标」那张卡整块换成红底（--up-soft）+ 红字（--up）。
+   深色配色里这个底比普通卡片还深一点（为了让红字过 4.5:1，见 --up-soft 的说明），
+   光靠底色深浅不足以说明"这张卡是重点"，所以补一道内描边 ——
+   不管在浅底还是深底上，"被圈出来的那张卡"都一眼可辨。 */
+.stat.hot{background:var(--up-soft);box-shadow:inset 0 0 0 1px var(--up-ring)}
 .stat.hot .v{color:var(--up)}
 .intra-sub{margin:var(--s-5) 0 var(--s-2);font-size:var(--t-sm);font-weight:700;color:var(--ink-2)}
 .intra-sub small{font-weight:600;color:var(--ink-3)}
@@ -779,6 +802,10 @@ footer b{color:var(--ink-2)}
    ★ 不用 .subtab 前缀：这个胶囊现在挂在坞的 <summary> 上，不在子标签里。 */
 .cnt.run{background:var(--brand);color:var(--on-brand);
   animation:breathe 1.8s var(--ease) infinite}
+/* ★ 漏了这条：taskStat() 在「定时已开启」时返回 cls:'on'，而 .cnt.on 从来没有
+   样式规则 → 「每天 17:30」这个**已生效的设置**和「未开启」长得一模一样（都是灰的），
+   完全违背上面那段设计意图。补成品牌浅色底 + 品牌色文字。 */
+.cnt.on{background:var(--brand-soft);color:var(--brand-ink)}
 @keyframes breathe{0%,100%{opacity:1}50%{opacity:.55}}
 
 /* ---- 盘中参考 · 实时更新控制条 ----
@@ -1158,7 +1185,8 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     </div>
     <div class="phead-act">
       <span class="pill wait" id="prePill">读取中…</span>
-      <button class="btn btn-sm btn-ghost" onclick="runTask('premarket')">▶ 跑一次盘前任务</button>
+      <button class="btn btn-sm btn-ghost" data-run="premarket"
+              onclick="runTask('premarket')">▶ 跑一次盘前任务</button>
     </div>
   </div>
 
@@ -1232,9 +1260,10 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     <h2>今日操作清单 <span class="tag" id="tagPreRes">盘前任务产出</span></h2>
     <div id="res-premarket"><div class="empty"><span class="empty-mark">🌅</span>
       <p class="empty-title">还没有盘前清单</p>
-      <p class="empty-note">跑一次「盘前任务」（几秒钟），这里会列出今天要卖的持仓、要买的候选股，
-        以及每只怎么买。也可以让它每天 09:10 自动跑。</p>
-      <button class="btn btn-primary" onclick="runTask('premarket')">▶ 跑一次盘前任务</button>
+      <p class="empty-note">跑一次「盘前任务」（几秒钟），这里会给出今天要不要动手的结论和买入候选股；
+        需要处理的持仓只在「我的持仓」页提醒。也可以让它每天 09:10 自动跑。</p>
+      <button class="btn btn-primary" data-run="premarket"
+              onclick="runTask('premarket')">▶ 跑一次盘前任务</button>
     </div></div>
   </div>
 
@@ -1256,7 +1285,8 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     </div>
     <div class="phead-act">
       <span class="pill wait" id="intraPill">还没有扫描结果</span>
-      <button class="btn btn-sm btn-ghost" onclick="runTask('intraday')">▶ 跑一次盘中任务</button>
+      <button class="btn btn-sm btn-ghost" data-run="intraday"
+              onclick="runTask('intraday')">▶ 跑一次盘中任务</button>
     </div>
   </div>
 
@@ -1276,14 +1306,14 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
         <option value="300">5 分钟</option>
       </select>
     </label>
-    <span class="live-dot" id="liveDot" aria-hidden="true"></span>
+    <span class="live-dot" aria-hidden="true"></span>
     <!-- ★ 这里刻意**不用** aria-live：状态行里带着每秒跳动的倒计时，
        放进 live region 会让读屏软件每一秒念一次，把真正重要的内容全盖掉。
        状态变化本身由按钮文案（实时更新 ⇄ 停止更新）承载，那是可聚焦元素。 -->
     <span class="live-st" id="liveSt">加载中…</span>
   </div>
 
-  <div class="card" id="intraCard">
+  <div class="card">
     <h2>两张清单 <span class="tag" id="tagIntra">等待盘中任务</span></h2>
     <div id="intraBox"><div class="empty"><span class="empty-mark">⏱</span>
       <p class="empty-title">还没有盘中扫描结果</p>
@@ -1292,14 +1322,14 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
         建议 14:30 左右跑 —— 那时时间进度已过 87%，推演结果最接近收盘。</p></div></div>
   </div>
 
-  <!-- 盘中任务的产出明细：今日盘中概览、持仓实时体检、口径说明。
+  <!-- 盘中任务的产出明细：今日盘中概览、口径说明。
        两张清单本身由上面的卡片呈现，这里跳过，避免同一张表出现两次。 -->
   <div class="card">
     <h2>任务明细与口径 <span class="tag" id="tagIntraRes">盘中任务产出</span></h2>
     <div id="res-intraday"><div class="empty"><span class="empty-mark">📋</span>
       <p class="empty-title">还没有盘中任务记录</p>
       <p class="empty-note">跑一次「盘中任务」后，这里会出现当天的盘中概览（扫描只数、
-        时间进度、两把尺子的口径）和持仓的实时体检结果。</p>
+        时间进度、两把尺子的口径）。</p>
     </div></div>
   </div>
 
@@ -1321,7 +1351,8 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     </div>
     <div class="phead-act">
       <span class="pill wait" id="postPill">读取中…</span>
-      <button class="btn btn-sm btn-primary" onclick="runTask('postmarket')">▶ 更新数据（盘后任务）</button>
+      <button class="btn btn-sm btn-primary" data-run="postmarket"
+              onclick="runTask('postmarket')">▶ 更新数据（盘后任务）</button>
     </div>
   </div>
 
@@ -1336,8 +1367,9 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     <div id="res-postmarket"><div class="empty"><span class="empty-mark">🌙</span>
       <p class="empty-title">还没有盘后总结</p>
       <p class="empty-note">跑一次「盘后任务」后，这里会出现今天的完整总结：今日数据概览、
-        明日买入候选股、明日怎么操作、以及持仓体检结果。</p>
-      <button class="btn btn-primary" onclick="runTask('postmarket')">▶ 更新数据（盘后任务）</button>
+        明日买入候选股、明日怎么操作。</p>
+      <button class="btn btn-primary" data-run="postmarket"
+              onclick="runTask('postmarket')">▶ 更新数据（盘后任务）</button>
     </div></div>
   </div>
 
@@ -1380,8 +1412,30 @@ tbody tr:nth-child(even){background:color-mix(in oklab,var(--surface-2) 62%,tran
     <div>
       <h2>我的持仓</h2>
       <p class="sub">登记真实的买入日期与买入价，页面自动帮你盯<b>止损线、止盈线</b>和
-        <b>最长持有天数</b>，触发时在菜单上亮红点。</p>
+        <b>最长持有天数</b>，触发时在菜单上亮红点。点上面的「⟳ 刷新持仓」可按选定间隔自动刷新
+        实时价与盈亏（收盘后会自动停）。</p>
     </div>
+  </div>
+
+  <!-- 持仓实时刷新控制条
+       ★ 独立一行、不属于卡片：下面那张卡片的内容每次刷新都会整体重建，
+         控制条若放在里面，倒计时和按钮状态会被反复清掉、按钮还会失焦。
+       ★ 运行中把间隔选择锁住、只留「停止刷新」可点 —— 否则「改了间隔
+         到底什么时候生效」是个说不清的中间态。 -->
+  <div class="livebar" id="hLiveBar" hidden>
+    <button class="btn btn-sm btn-primary" id="btnHLive" type="button"
+            onclick="toggleHLive()">⟳ 刷新持仓</button>
+    <label class="live-f" id="hIntLab" for="hInt">每
+      <select id="hInt" aria-label="持仓刷新间隔">
+        <option value="30">30 秒</option><option value="60" selected>1 分钟</option>
+        <option value="120">2 分钟</option><option value="300">5 分钟</option>
+      </select>
+    </label>
+    <span class="live-dot" aria-hidden="true"></span>
+    <!-- ★ 这里刻意**不用** aria-live：状态行里带着每秒跳动的倒计时，
+       放进 live region 会让读屏软件每一秒念一次，把真正重要的内容全盖掉。
+       状态变化本身由按钮文案（刷新持仓 ⇄ 停止刷新）承载，那是可聚焦元素。 -->
+    <span class="live-st" id="hLiveSt">加载中…</span>
   </div>
 
   <div class="card">
@@ -1444,6 +1498,21 @@ let LIVE_CLOSED=false;
 const LIVE={on:false, iv:60, busy:false, n:0, fail:0, denied:0, cd:0,
             tick:null, lastAt:'', prev:null, why:'', diff:'', phase:''};
 const LIVE_MAX_FAIL=3, LIVE_MAX_DENY=5;
+
+/* 「我的持仓」页的实时刷新状态 —— 镜像 LIVE，但简单得多：
+   持仓没有「全市场扫描」那种长跑轮询，一次 /api/holdings?live=1 就回来，
+   成功就记一次、取不到实时价就降级收盘价并算一次失败。
+   字段：on 开关 / iv 间隔秒 / busy 正在刷新 / n 本次已刷新次数 /
+        fail 连续失败 / cd 倒计时秒 / tick 秒表 / lastAt 上次完成时刻 /
+        why 停止原因 / phase 当前阶段文案 / mode 数据口径(live/close) /
+        asof 行情时刻 / note 人话说明 / degraded 降级原因 / session 是否仍在交易时段
+   ★ degraded 与 fail 是**两回事**：整批都拿不到价（网络坏了）算失败、连续 3 次
+     就收手；只拿到一部分（某只停牌）算降级 —— 亮原因但**不掐掉刷新**，
+     否则一只停牌股会让其余持仓也停止更新。 */
+const HLIVE={on:false, iv:60, busy:false, n:0, fail:0, cd:0, tick:null,
+             lastAt:'', why:'', phase:'', mode:'close', asof:'', note:'',
+             degraded:'', session:''};
+const HLIVE_MAX_FAIL=3;
 
 /* ============================================================================
    分区导航（左菜单 · 右显示区）
@@ -1612,7 +1681,7 @@ function renderThemeOpts(){
     '<span class="t-note">'+esc(p.note)+'</span></span></button>').join('');
 }
 
-function applyTheme(pref){
+function applyTheme(pref, persist){
   if(pref!=='auto' && !PAL_MODE[pref]) pref='auto';
   const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   const pal = (pref==='auto') ? (dark?'ink':'paper') : pref;
@@ -1620,7 +1689,9 @@ function applyTheme(pref){
   el.setAttribute('data-palette', pal);
   el.setAttribute('data-mode', PAL_MODE[pal] || 'light');
   el.setAttribute('data-theme-pref', pref);
-  try{ localStorage.setItem('bia_theme', pref); }catch(e){}
+  /* persist===false 只用于首屏那次同步：如果这次配色是地址栏 ?theme= 指定的，
+     写进 localStorage 就等于"点一次链接 = 永久改掉我的设置"。见文件头内联脚本。 */
+  if(persist!==false){ try{ localStorage.setItem('bia_theme', pref); }catch(e){} }
   const nm=$('themeName'), p=PALETTES.find(x=>x.id===pref);
   if(nm) nm.textContent = (pref==='auto' ? '跟随系统' : (p?p.name:'')) ;
   document.querySelectorAll('#themeOpts .theme-opt').forEach(b=>
@@ -1652,8 +1723,11 @@ if(window.matchMedia){
   mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
 }
 renderThemeOpts();
-// 首屏同步一次（内联脚本已经设过，这里保证按钮文案与选中态正确）
-applyTheme(document.documentElement.getAttribute('data-theme-pref') || 'auto');
+/* 首屏同步一次（内联脚本已经设过，这里保证按钮文案与选中态正确）。
+   ★ 只有「这次不是地址栏指定的」才允许写 localStorage —— 否则打开一次
+     带 ?theme= 的书签就会把用户自己的设置覆盖掉。 */
+applyTheme(document.documentElement.getAttribute('data-theme-pref') || 'auto',
+           document.documentElement.getAttribute('data-theme-from-url') !== '1');
 
 /* 大数字滚动到位：只在数值真的变化时跑，且尊重「减少动态效果」设置 */
 function setNum(el, to){
@@ -1737,13 +1811,29 @@ async function refreshDataWarn(){
    ★ 为什么盯 version 而不是 data_version：只有「盘后任务」会写 daily 表，
      盘前/盘中任务的产出不在 daily 里 —— 只看数据版本的话，
      盘中任务跑完页面不会刷新。version = 数据版本 + 最近一次任务执行，
-     任何任务跑完都会变。 */
-let DATA_VER=null, VER_SEEN=false, VER_BUSY=false;
+     任何任务跑完都会变。
+   ★★ version 只在任务**真正结束**后才变：后端 db.get_last_run_id 已改成只看
+     finished_at 非空的行。以前它取"最新一行"（不论状态），而 task_runs 是
+     任务一开始就插 running 行 —— 于是任务**刚启动**的那一秒版本号就变了，
+     本函数立刻判定"跑完了"：弹横幅 + loadAll(拿到旧数据)。
+     盘后任务要跑 20 分钟，这 20 分钟里用户已经被告知"执行完成"了。 */
+let DATA_VER=null, VER_SEEN=false, VER_BUSY=false, PAGE_READY=false;
 function startStatusWatch(){
   setInterval(async()=>{
     let s; try{ s=await jget("/api/status"); }catch(e){ return; }
     applyStatus(s);
     const ver = s.version || s.data_version;
+    /* ★ 后端可能在本页**打开之后**才起来（先开浏览器、后开控制台，很常见）。
+       这时 boot 的重试窗口早就过了，页面上还是各分区的空状态。
+       所以「首轮」这个基线不能无条件吃掉 —— 只有本页确实成功加载过一次
+       （PAGE_READY）才有基线可言；否则第一次拿到状态就是补载的时机。
+       不这样做的话，后端一恢复，本页会一直停在空卡片上，
+       非要等到恰好有个任务跑完（版本号变化）才醒过来。 */
+    if(!PAGE_READY){
+      PAGE_READY=true; DATA_VER=ver; hideBanner();
+      try{ await loadAll(); }catch(e){ console.error(e); }
+      return;
+    }
     if(!VER_SEEN){ VER_SEEN=true; DATA_VER=ver; return; }   // 首轮只记基线
     if(ver===DATA_VER || VER_BUSY) return;
     DATA_VER=ver;
@@ -1752,7 +1842,12 @@ function startStatusWatch(){
       await loadAll();
       const lr=s.last_run||{};
       const nm={premarket:"盘前任务",intraday:"盘中任务",postmarket:"盘后任务"}[lr.task]||"任务";
-      bannerAuto(`${nm}已执行完成，本页所有卡片已自动刷新。`,"info",10000);
+      /* ★ 失败也要说清楚：报「已执行完成」会让用户以为拿到了新数据，
+         实际上什么都没写成。 */
+      if(lr.status==="fail")
+        bannerAuto(nm+"执行失败 —— 到页面底部「定时与记录」展开可看原因。","warn",15000);
+      else
+        bannerAuto(nm+"已执行完成，本页所有卡片已自动刷新。","info",10000);
     }catch(e){} finally{ VER_BUSY=false; }
   }, 8000);
 }
@@ -1933,7 +2028,7 @@ async function loadToday(){
       '<th>代码</th><th>名称</th><th>现价</th><th>BIAS</th><th>换手%</th>'+
       '<th>量比</th><th>近5日%</th><th>成交额(亿)</th></tr></thead><tbody>';
     for(const c of t.candidates){
-      const cls = (c.chg5d||0)<0 ? "down" : "up";
+      const cls = chgCls(c.chg5d);   // null/0 不上色（原来会染成"涨"）
       // 各字段都可能为 null（数据缺失），统一用 fmt() 兜底，避免 toFixed 抛错
       h+='<tr>'+
          `<td class="code" data-label="代码">${esc(c.code)}</td>`+
@@ -1990,7 +2085,7 @@ function intraTable(rows, mode){
     (near?'<th class="l">还差什么</th>':'')+'</tr></thead><tbody>';
   for(const r of rows){
     const chg=(r.chg5d==null)?'—':((+r.chg5d>=0?'+':'')+(+r.chg5d).toFixed(2));
-    const cls=(r.chg5d||0)<0?'down':'up';
+    const cls=chgCls(r.chg5d);     // null/0 不上色（原来会染成"涨"）
     h+='<tr>'+
       '<td class="code" data-label="代码">'+esc(r.code)+'</td>'+
       '<td data-label="名称">'+esc(r.name||'')+(r.st?'<span class="stmark">ST</span>':'')+'</td>'+
@@ -2024,7 +2119,8 @@ async function loadIntraday(){
       '它用实时行情推演当天广度，只要几秒。<br>'+
       '点上面「⟳ 实时更新」马上扫（不留记录），或点右上角「▶ 跑一次盘中任务」。'+
       '建议 14:30 左右 —— 那时时间进度已过 87%，推演结果最接近收盘。</p>'+
-      '<button class="btn btn-primary" onclick="runTask(\'intraday\')">▶ 跑一次盘中任务</button>'+
+      '<button class="btn btn-primary" data-run="intraday" '+
+      'onclick="runTask(\'intraday\')">▶ 跑一次盘中任务</button>'+
       '</div>';
     navIntra('待跑', false);
     setPill('intraPill','还没有扫描结果','wait');
@@ -2062,6 +2158,18 @@ async function loadIntraday(){
        '只能当历史记录看。<br>要看今天的：点上面「⟳ 实时更新」马上扫一次'+
        '（建议 14:30 左右，那时时间进度已过 87%，最接近收盘）。</p>';
   }
+  /* ★ 刚开盘那几分钟（时间进度不足 5%）扫描出来的数字是**假的精确**：
+     成交量要按「已开盘时长占比」放大成全日量，进度 5% 就意味着放大 20 倍，
+     盘口上任何一点噪声都会被放大成「放量」→ 达标清单里会冒出一堆假信号。
+     后端把 prog 钳在 5% 并置 early=true 就是这个原因，但前端以前一个字都不提，
+     用户看到「时间进度 5%」只会以为"哦，刚开始"，然后照着那张清单去买。
+     这是本页最容易被误读的一处，必须在主卡片上说透。 */
+  if(d.early){
+    h+='<p class="intra-note" style="color:var(--warn)">⚠ <b>刚开盘，这张表不能用来下单</b> —— '+
+       '现在时间进度只有约 '+(prog*100).toFixed(0)+'%，成交量要按这个比例放大成全日量，'+
+       '放大倍数约 <b>'+(1/Math.max(prog,0.01)).toFixed(0)+' 倍</b>，'+
+       '盘口上一点点波动都会被放大成「放量」。</p>';
+  }
   h+='<div class="iph"><span class="pill '+pcls+'">'+esc(ptxt)+'</span>'+
     '<span class="mini">'+(prog>=0.999 ? "已收盘口径" : "时间进度 "+(prog*100).toFixed(0)+"%")+
     ' · 日线基准 '+(esc(d.base_date||"—"))+' · 扫描 '+fmt(d.scanned)+' 只</span></div>';
@@ -2077,11 +2185,21 @@ async function loadIntraday(){
   /* ★ 页内分段：这一页装着两张清单 + 一段口径说明，全摊开就变成新的长页面。
      用三个子标签分开，一屏只呈现一件事；标签上直接带数量，
      不点进去也知道各自有多少。默认停在「有内容的」那一页。 */
-  const hitN=(d.candidates||[]).length;
+  const hitN=(d.candidates||[]).length, nearShown=(d.bias_only||[]).length;
+  /* ★ 两张清单在**后端就被截断**到前 list_limit 只（默认 30，按乖离率升序），
+     而 pill / 卡片 / 子标签上的数字是**全量计数**。三处若各说各话
+     （「达标 96 只」的表里只有 30 行），用户第一反应是"程序算错了/漏了"。
+     统一口径：上面的数字一律用全量计数（那才是"有多少机会"），
+     被截断的那一段在表格上方用一句话讲清楚；未截断时这句话不出现。 */
+  const cutHint=(shown,total,conf)=>{
+    if(!(total>shown)) return '';
+    return '<p class="intra-note">这里只列出全部 <b>'+fmt(total)+'</b> 只中的前 <b>'+shown+
+           '</b> 只（按乖离率升序，越靠前跌得越狠）。'+conf+'</p>';
+  };
   /* 默认停在「有内容的」那一段；但用户手动选过就听用户的（INTRA_SUB）。 */
   const sub0 = INTRA_SUB || (hitN ? 'hit' : (nearN ? 'near' : 'hit'));
   h+='<div class="subtabs" role="tablist" aria-label="盘中参考视图">'+
-     subTab('hit', '达标清单', hitN, sub0==='hit')+
+     subTab('hit', '达标清单', pool, sub0==='hit')+
      subTab('near','仅乖离率', nearN, sub0==='near')+
      subTab('note','口径说明', null, sub0==='note')+
      '</div>';
@@ -2089,6 +2207,7 @@ async function loadIntraday(){
   h+='<div class="subpane" data-sub="hit"'+(sub0==='hit'?'':' hidden')+'>';
   if(hitN){
     h+='<div class="intra-sub">沪深主板 · 条件全过<small> · 按乖离率升序</small></div>'+
+       cutHint(hitN, pool, '条件全过的票本来就少，列全与否不影响判断。')+
        intraTable(d.candidates, "hit");
   }else{
     h+='<p class="intra-note">主板没有同时满足全部条件的股票。这是常态 —— 机会一年只有几次，'+
@@ -2099,6 +2218,7 @@ async function loadIntraday(){
   h+='<div class="subpane" data-sub="near"'+(sub0==='near'?'':' hidden')+'>';
   if(nearN){
     h+='<div class="intra-sub">沪深主板 · 只看乖离率<small> · 参考，条件没全过</small></div>'+
+       cutHint(nearShown, nearN, '观察池只看"跌得够狠"的前若干只，不追求列全。')+
        intraTable(d.bias_only, "near")+
        '<p class="intra-note">最后两列说明它<b>还差哪一项</b>。这张表是观察池：'+
        '如果下午补量，收盘时就可能转成达标 —— 这也是 14:30 跑一次的意义。</p>';
@@ -2151,11 +2271,19 @@ async function loadIntraday(){
   else              navIntra('无', false);
 
   /* 页头胶囊：这一页最该知道的是「扫的是哪一刻」。隔天的旧结果必须标出来，
-     否则用户会把昨天的清单当成今天的。 */
+     否则用户会把昨天的清单当成今天的。
+     ★ setPill 内部走的是 textContent（不是 innerHTML）—— 这里**不能**再 esc()。
+       以前传的是 esc(quote_date)，日期里没有特殊字符所以看不出问题；
+       可一旦某天来源带个 & 或引号，页面上就会原样印出 &amp; / &quot;。 */
   setPill('intraPill',
-    staleDay ? ('上次扫描 '+esc(d.quote_date||'')+'（已过时）')
-             : (esc(d.quote_date||'')+' '+esc(d.quote_time||'')),
+    staleDay ? ('上次扫描 '+(d.quote_date||'')+'（已过时）')
+             : ((d.quote_date||'')+' '+(d.quote_time||'')),
     staleDay ? 'watch' : ((gate||gateM) ? 'act' : (nearN>0 ? 'watch' : 'wait')));
+
+  /* ★ 本页正文里也有一个「▶ 跑一次盘中任务」按钮，而且它是**每次重绘都新生成**
+     的 —— 新按钮不带 disabled，任务正在跑时它会是亮的。重绘完立刻按当前
+     运行态补一次，别让"刚刷出来就又能点"这种情况发生。 */
+  applyRunBtns();
 }
 
 /* ============================================================================
@@ -2235,7 +2363,14 @@ function startLive(){
   const s=$('liveInt');
   LIVE.iv = parseInt(s && s.value, 10) || 60;
   LIVE.on=true; LIVE.n=0; LIVE.fail=0; LIVE.denied=0;
-  LIVE.why=''; LIVE.diff=''; LIVE.cd=0; LIVE.busy=false;
+  /* ★ 不要在这里把 LIVE.busy 抹成 false。
+     场景：用户在一次扫描进行到一半时按「停止更新」，随手又点了「实时更新」——
+     那一刻 busy 仍是 true（stopLive 刻意不动它）。若这里清掉，
+     上一轮还没收尾的轮询循环就和新发起的请求撞在一起：
+     同一个扫描结果被两边各记一次数、cd 被写两遍，界面上会出现两条互相打架的进度。
+     正确做法是**让在跑的那一次继续跑完并认领为新一轮的首刷**：
+     busy 为真时 refreshLive() 会自然返回，倒计时先摆到 iv，等它落地。 */
+  LIVE.why=''; LIVE.diff=''; LIVE.cd = LIVE.busy ? LIVE.iv : 0;
   renderLive();
   navIntra();                       // 菜单角标加「· 实时」
   if(!LIVE.tick) LIVE.tick=setInterval(liveTick, 1000);
@@ -2323,14 +2458,166 @@ async function refreshLive(){
 }
 
 /* 页面切到后台先暂停：没人看的时候每秒拉一次全市场快照纯属浪费；
-   切回来立刻补一次，不会让用户对着旧数字做判断。 */
+   切回来立刻补一次，不会让用户对着旧数字做判断。
+   ★ 持仓实时刷新同样接上：切后台先停秒表（状态行标「⏸ 在后台」），
+     切回来把 cd 摆到 iv 并立刻刷一次 —— 否则用户回来对着旧收盘/旧实时价做判断。 */
 document.addEventListener('visibilitychange', ()=>{
-  if(!LIVE.on) return;
-  if(document.hidden){ renderLive(); return; }
-  LIVE.cd=LIVE.iv;
-  renderLive();
-  refreshLive();
+  if(LIVE.on){
+    if(document.hidden){ renderLive(); return; }
+    LIVE.cd=LIVE.iv;
+    renderLive();
+    refreshLive();
+  }
+  if(HLIVE.on){
+    if(document.hidden){ renderHLive(); return; }
+    HLIVE.cd=HLIVE.iv;
+    renderHLive();
+    refreshHLive();
+  }
 });
+
+/* ===================== 「我的持仓」实时刷新状态机 =====================
+   逐条镜像「盘中参考」的 LIVE 那套：按钮文案切换、运行中锁间隔、倒计时、
+   后台暂停、收盘自动收手、连续失败自动停止。差别只在两处：
+   ① 一次 /api/holdings?live=1 直接返回，没有「扫描进行中」的轮询循环；
+   ② 取不到实时价时不算「请求失败」，而是后端降级成收盘价并告诉我们
+      （d.live!==true），这时也要算一次失败、连续几次就自己收手，
+      否则数据源挂了还无限空转。 */
+
+function hLiveEls(){ return {b:$('btnHLive'), s:$('hInt'), st:$('hLiveSt'),
+                             bar:$('hLiveBar'), lab:$('hIntLab')}; }
+
+function hLiveSet(html, warn){
+  const st=$('hLiveSt'); if(!st) return;
+  if(st.dataset.h!==html){ st.dataset.h=html; st.innerHTML=html; }
+  st.classList.toggle('warn', !!warn);
+}
+
+/* 把当前状态画到持仓控制条上。任何状态变化、每秒倒计时都调它。 */
+function renderHLive(){
+  const e=hLiveEls(); if(!e.b) return;
+  e.bar.classList.toggle('on', HLIVE.on);
+  e.b.className = 'btn btn-sm ' + (HLIVE.on ? 'btn-stop' : 'btn-primary');
+  e.b.textContent = HLIVE.on ? '■ 停止刷新' : '⟳ 刷新持仓';
+  e.b.title = HLIVE.on ? '停止自动刷新（当前这次会跑完）'
+                      : '按选定间隔自动重拉持仓的实时价与盈亏';
+  /* ★ 运行中锁住间隔：把「改了到底什么时候生效」这个中间态直接消掉。 */
+  e.s.disabled = HLIVE.on;
+  e.s.title = HLIVE.on ? '实时刷新中 —— 先点「停止刷新」才能改间隔' : '';
+  if(e.lab) e.lab.classList.toggle('locked', HLIVE.on);
+
+  if(!HLIVE.on){
+    if(HLIVE.why){ hLiveSet(HLIVE.why, true); return; }
+    if(HLIVE.n)  { hLiveSet('已停止 · 上次刷新 <b>'+esc(HLIVE.lastAt||'—')+
+                            '</b> · 本次共刷新 <b>'+HLIVE.n+'</b> 次'); return; }
+    hLiveSet('点「刷新持仓」后，页面会按上面的间隔自动重拉你持仓的实时价与盈亏。');
+    return;
+  }
+  if(HLIVE.busy){
+    hLiveSet('<b>正在刷新…</b>' + (HLIVE.phase ? ' '+esc(HLIVE.phase) : '')); return;
+  }
+  if(document.hidden){
+    hLiveSet('⏸ <b>页面在后台，已暂停</b> —— 切回本页会自动继续并立刻刷一次。'); return;
+  }
+  /* ★ 核心：状态行必须让人一眼看出看的是实时价还是收盘价，但**不靠颜色**——
+     这套系统里 .up＝涨（红），状态行里若把时刻染红，用户会误读成"这只票在涨"，
+     而它只是个时刻，跟 chgCls() "染色只表达涨跌" 的约定打架。
+     所以两层信息靠字重/明暗区分：实时＝普通加粗（ink 色、正常醒目），
+     收盘价＝.mut（灰，一眼看出是旧的）。.mut 是文件现成类，holdTable 里「—」就在用。 */
+  const data = (HLIVE.mode==='live')
+    ? '实时 <b>'+esc(HLIVE.asof||'—')+'</b>'
+    : '收盘价 <b class="mut">'+esc(HLIVE.asof||'—')+'</b>';
+  /* 上一轮没刷成（降级/失败）的原因要留在状态行里，否则倒计时归零重置、
+     用户却不知道这次根本没拿到实时价。
+     ★ 降级（只拿到一部分）用琥珀色、失败用红色：两者严重程度不同，
+       而且降级不会掐掉刷新，用户需要能分辨「要不要管它」。 */
+  const note = HLIVE.fail
+    ? ' · <b class="bad">'+esc(HLIVE.phase || '上次刷新失败，稍后会自动重试')+'</b>'
+    : (HLIVE.degraded
+        ? ' · <b style="color:var(--warn)">'+esc(HLIVE.degraded)+'</b>'
+        : '');
+  hLiveSet('下次刷新 <b>'+(HLIVE.cd>0?HLIVE.cd:1)+' 秒</b>后 · 上次 '+
+          (HLIVE.lastAt ? '<b>'+esc(HLIVE.lastAt)+'</b>' : '—') +
+          (HLIVE.n ? ' · 已刷新 <b>'+HLIVE.n+'</b> 次' : '') +
+          ' · 数据：'+data + note);
+}
+
+function toggleHLive(){ if(HLIVE.on) stopHLive('已手动停止。'); else startHLive(); }
+
+function startHLive(){
+  if(HLIVE.on) return;
+  const s=$('hInt');
+  HLIVE.iv = parseInt(s && s.value, 10) || 60;
+  HLIVE.on=true; HLIVE.n=0; HLIVE.fail=0;
+  /* ★ 不要在这里把 HLIVE.busy 抹成 false（理由同 startLive）：
+     用户可能在一次刷新进行到一半时按「停止刷新」又立刻再点「刷新持仓」，
+     那一刻 busy 仍是 true（stopHLive 刻意不动它）。若这里清掉，上一次还没
+     收尾的轮询就和新请求撞在一起。正确做法是让在跑的那次继续跑完并认领为
+     新一轮首刷：busy 为真时 refreshHLive 会自然返回，倒计时先摆到 iv 等它落地。 */
+  HLIVE.why=''; HLIVE.cd = HLIVE.busy ? HLIVE.iv : 0;
+  renderHLive();
+  if(!HLIVE.tick) HLIVE.tick=setInterval(hLiveTick, 1000);
+  refreshHLive();
+}
+
+function stopHLive(why){
+  /* ★ 不动 HLIVE.busy：它只由 refreshHLive 自己管。
+     用户可能在刷新进行到一半时按停止 —— 那一刻若把 busy 抹成 false，
+     紧接着重新开始就会再发一次请求，撞上服务端的「正在刷新中」被算成一次失败。
+     让在跑的那一次自然收尾，结果照样会刷到页面上（此时 HLIVE.on 已是 false）。 */
+  HLIVE.on=false; HLIVE.why=why||'';
+  if(HLIVE.tick){ clearInterval(HLIVE.tick); HLIVE.tick=null; }
+  renderHLive();
+}
+
+function hLiveTick(){
+  if(!HLIVE.on || HLIVE.busy || document.hidden) return;
+  HLIVE.cd--;
+  if(HLIVE.cd<=0){ refreshHLive(); return; }
+  renderHLive();
+}
+
+async function refreshHLive(){
+  if(HLIVE.busy) return;
+  HLIVE.busy=true;
+  HLIVE.phase='正在刷新持仓实时价…';
+  renderHLive();
+
+  let d;
+  try{
+    d=await loadHoldings(true);
+  }catch(e){
+    HLIVE.busy=false;
+    HLIVE.fail++; HLIVE.phase='请求失败（后端未响应）';
+    renderHLive();
+    return;
+  }
+  HLIVE.busy=false;
+
+  /* 空仓或手动停止会让 loadHoldings 内部把 HLIVE.on 关掉，这里直接收手，
+     不必再看 fail / closed（stopHLive 已经把 why 写好了）。 */
+  if(!HLIVE.on) return;
+  if(!d){ HLIVE.fail++; renderHLive(); return; }
+
+  if(d.live===true){ HLIVE.fail=0; HLIVE.degraded=''; HLIVE.lastAt=d.asof; HLIVE.n++; }
+  else if(d.partial){
+    /* 只拿到一部分实时价：整表已退回收盘价（服务端不标 live），这件事要说，
+       但**不算连续失败** —— 停牌股可能连着几天没价，掐掉刷新会连累其余持仓。 */
+    HLIVE.fail=0; HLIVE.degraded=d.note||'部分持仓没取到实时价'; HLIVE.n++;
+  }
+  else { HLIVE.fail++; HLIVE.phase=d.note||'实时行情未取到'; HLIVE.degraded=''; }
+
+  if(HLIVE.fail>=HLIVE_MAX_FAIL){
+    stopHLive('⚠ 连续 '+HLIVE.fail+' 次没拿到实时行情，已自动停止：'+esc(HLIVE.phase)+'…');
+    return;
+  }
+  /* ★ 收盘自动收手：快照已经等于收盘价，再按秒刷不会有新信息（与 LIVE 同一套）。 */
+  if(d.session==='closed'){
+    stopHLive('已收盘（实时价＝收盘价），已停止刷新。');
+    return;
+  }
+  renderHLive();
+}
 
 /* 页内子标签的按钮。cnt 为 null 时不显示数量胶囊。 */
 function subTab(key, text, cnt, on){
@@ -2492,8 +2779,12 @@ function holdTable(rows, maxHold, withDel){
     '<th>盈亏%</th><th>止损线</th><th>止盈1/2</th><th>持有日</th><th class="l">提示</th>'+
     '<th></th></tr></thead><tbody>';
   for(const x of rows){
-    const pnl=(x.pnl_pct==null||isNaN(x.pnl_pct))?'<span class="mut">—</span>'
-      :(x.pnl_pct>=0?'<span class="up">+':'<span class="down">')+(+x.pnl_pct).toFixed(2)+'%</span>';
+    /* 盈亏染色：缺失 → 「—」中性；恰好 0.00% → 中性（平盘不是涨）。
+       旧写法 pnl_pct>=0 会把 0 染成红，看起来像"赚了"。 */
+    const pv=(x.pnl_pct==null||isNaN(x.pnl_pct)) ? null : +x.pnl_pct;
+    const pnl=(pv==null) ? '<span class="mut">—</span>'
+      : (pv>0 ? '<span class="up">+' : (pv<0 ? '<span class="down">' : '<span class="mut">'))
+        + pv.toFixed(2)+'%</span>';
     const lv=(x.level==="danger"||x.level==="win"||x.level==="warn")?x.level:"ok";
     const over=(maxHold!=null)&&((x.days_held||0)>=maxHold);
     // 提示去重：① 与 action 重复的「正常持有」不再显示；
@@ -2524,8 +2815,16 @@ function holdTable(rows, maxHold, withDel){
   return h+'</tbody></table></div>';
 }
 
-async function loadHoldings(){
-  const d=await jget("/api/holdings");
+async function loadHoldings(live){
+  /* ★ 形参 live 决定这次要不要带 ?live=1 去拉实时价：
+       · 不传（undefined）→ 跟随 HLIVE.on：用户在自动刷着，手动加/删一只票后，
+         重新渲染也继续是实时价；没开自动刷新时则走后端 2 分钟缓存或收盘价。
+       · 显式传 true/false → 强制。refreshHLive 强制 true 才有意义。
+     ★ 必须字符串拼接、保留 /api/holdings 这个字面量：
+       静态自测会从 index.html 里正则捞 /api/... 字面量比对后端路由，
+       把 /api/holdings 拆散写会搜不到。 */
+  const useLive = (live===undefined) ? HLIVE.on : !!live;
+  const d=await jget("/api/holdings"+(useLive?"?live=1":""));
   const box=$("holdBox");
   // 卡片标题里的止损/止盈/持有上限跟随 strategy_config.json，改配置后刷新即变
   if(d.exit){
@@ -2539,20 +2838,38 @@ async function loadHoldings(){
   const wrap=$("hformWrap");
   if(wrap && !wrap.dataset.touched) wrap.open = !d.holdings.length;
 
+  /* 把这一次的行情口径存进 HLIVE，供控制条状态行一眼区分实时价 / 收盘价。
+     data_mode 是权威字段；老接口若没给就按 live 兜底。asof 是行情时刻或数据日期。 */
+  HLIVE.mode   = d.data_mode || (d.live===true ? 'live' : 'close');
+  HLIVE.session= d.session || '';
+  HLIVE.asof   = d.asof || '';
+  HLIVE.note   = d.note || '';
+  /* 只拿到一部分实时价时，服务端已整体降级为收盘价并把原因写在 note 里；
+     这里把它提到状态行上（琥珀色），别让用户以为「我明明刷过、怎么还是旧价」。 */
+  HLIVE.degraded = (d.live===true) ? ''
+    : (d.partial ? (d.note || '部分持仓没取到实时价') : '');
+
   const n=d.holdings.length;
   if(!n){
+    // 空仓：控制条本来就不该出现 —— 停掉自动刷新并藏起来
+    stopHLive('当前没有持仓记录。');
+    const bar=$("hLiveBar"); if(bar) bar.hidden=true;
     box.innerHTML='<div class="empty"><span class="empty-mark">＋</span>'+
       '<p class="empty-title">还没有持仓记录</p>'+
       '<p class="empty-note">买入后在上面登记「代码 / 买入日期 / 买入价」，页面会自动帮你盯止损与止盈。</p></div>';
     setNav('hold','空仓',false);
-    return;
+    return d;
   }
+  // 有持仓才显示控制条（空仓页只有一行引导，不该有刷新条）
+  const bar=$("hLiveBar"); if(bar) bar.hidden=false;
   box.innerHTML=holdTable(d.holdings, d.max_hold_days, true);
   /* 菜单角标：持仓页唯一要紧的是「有没有票需要动手」。
      触发止损用红点，锁利/提醒用琥珀点 —— 类型不同，别都染成红的。 */
   const hasD=d.holdings.some(x=>x.level==='danger');
   const hasW=d.holdings.some(x=>x.level==='win'||x.level==='warn');
   setNav('hold', n+' 只', true, hasD?'hot':(hasW?'warn':''));
+  renderHLive();
+  return d;
 }
 
 async function addHolding(){
@@ -2581,6 +2898,18 @@ async function delHolding(id){
 /* ============ 任务中心 ============ */
 function esc(s){ return String(s==null?"":s)
   .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+/* 涨跌染色统一走这里：null / NaN / 正好 0 一律**不上色**（保持中性）。
+   ★ 旧写法 (v||0)<0 ? 'down' : 'up' 有两个坑：
+     ① v 缺失时 0<0 为假 → 染成"涨"（红）。表格里明明印着「—」，
+        一个根本没有数据的东西被画成了上涨 —— 这是最容易骗过眼睛的一类错；
+     ② 恰好 0.00% 也染红。平盘既不是涨也不是跌，A 股界面里就该是中性色。
+   A 股惯例：涨＝红、跌＝绿。 */
+function chgCls(v){
+  const n=(v==null ? NaN : +v);
+  if(!isFinite(n) || n===0) return '';
+  return n<0 ? 'down' : 'up';
+}
 
 /* 说明类文本里允许用 **加粗**（后端 blocks[].text 里写了 **…**）。
    ★ 顺序必须是「先转义、再替换」——反过来的话用户可控内容就能注入 HTML。
@@ -2631,7 +2960,7 @@ function renderBlocks(blocks){
       // 与「盘中参考」卡片共用同一套渲染，两处永远长得一样
       h+=intraTable(rows, b.mode||'hit');
     }else if(b.kind==='holdings'){
-      // 与「我的持仓」卡片共用同一套表格渲染，保证两处样式一致、都不会裁字
+      // 仅为兼容库里存过的历史结果保留 —— 三个任务现在都不再产出 holdings 块，且已被 TASK_SKIP 跳过。
       h+=holdTable(rows, b.max_hold_days || ((rows[0]||{}).max_hold_days), false);
     }
     h+='</div>';
@@ -2659,8 +2988,11 @@ const TASK_PILL={premarket:'prePill', intraday:'intraPill', postmarket:'postPill
 const TASK_RESTAG={premarket:'tagPreRes', intraday:'tagIntraRes', postmarket:'tagPostRes'};
 /* ★ 结果块里与该页正文重复的部分要跳过，否则同一张表会出现两次：
    · 盘前任务的「今日开盘买入清单」＝ 正文的「今日候选股」
-   · 盘中任务的「达标清单 / 仅乖离率」＝ 正文的「两张清单」 */
-const TASK_SKIP={premarket:['candidates'], intraday:['intraday'], postmarket:[]};
+   · 盘中任务的「达标清单 / 仅乖离率」＝ 正文的「两张清单」
+   ★ 2026-09-18 用户要求持仓只出现在「我的持仓」页；三个任务的结果块不再
+     展示持仓表（含库里存过的历史结果），只保留后端给的那一行指向「我的持仓」的提醒。
+     所以三个键都跳过 holdings。 */
+const TASK_SKIP={premarket:['candidates','holdings'], intraday:['intraday','holdings'], postmarket:['holdings']};
 
 function taskStat(t){
   if(t.running){
@@ -2672,6 +3004,27 @@ function taskStat(t){
   return {txt:'未开启', cls:''};
 }
 
+/* ★ 正文里那几个「跑一次 XX 任务」的按钮是**静态写在 HTML 里的**，
+   不会像坞里的「▶ 立即执行」那样随轮询重绘 —— 于是任务在跑的那 20 分钟里
+   它们看上去毫无变化，用户以为没点上、反复点，每次都只换来一条
+   "已有任务在执行"的横幅。而服务端三个任务之间本来就是**互斥**的
+   （api_task_run 里 any running 即拒绝），所以只要有任何任务在跑，
+   所有这种按钮都该是禁用的、并且说清为什么点不动。
+   统一走这两个函数，别再让每处各写一套。 */
+let TASK_RUNNING=false;
+function setRunBtns(running){ TASK_RUNNING=!!running; applyRunBtns(); }
+function applyRunBtns(){
+  document.querySelectorAll('[data-run]').forEach(b=>{
+    b.disabled = TASK_RUNNING;
+    if(TASK_RUNNING){
+      if(b.dataset.t0===undefined) b.dataset.t0 = b.title || '';
+      b.title = '已经有任务在执行了，等它跑完再点。';
+    }else if(b.dataset.t0!==undefined){
+      b.title = b.dataset.t0; delete b.dataset.t0;
+    }
+  });
+}
+
 /* 一次把三个任务的坞都渲染出来。它们分处三个分页，互不影响。 */
 function renderDocks(data){
   TASK_DATA=data;
@@ -2680,6 +3033,7 @@ function renderDocks(data){
      盘后任务要跑 20 分钟，用户切到别的分页时全靠这个角标知道它还在跑。 */
   const list=data.tasks||[];
   const runT=list.find(t=>t.running);
+  setRunBtns(list.some(t=>t.running));
   if(runT){
     const p=(runT.progress&&runT.progress.total>0)
       ? Math.round(runT.progress.done/runT.progress.total*100) : 0;
@@ -2827,6 +3181,9 @@ async function runTask(key){
     /* ★ 不再"跳去任务中心"（那一层已经没有了）—— 任务就在用户当前这一页，
        直接把该任务的坞展开，进度条就是这个动作的反馈。 */
     const dock=$('dock-'+key); if(dock) dock.open=true;
+    /* 按钮先自己锁上，不用等下一次轮询 —— 否则点完到轮询之间那几秒
+       按钮还是亮的，手快的人会再点一次。 */
+    setRunBtns(true);
     await loadTasks(); startTaskPoll();
   }
 }
@@ -2871,6 +3228,8 @@ function startTaskPoll(){
       if(pane==='intra') navIntra(txt, true, '');
       else               setNav(pane, txt, true, '');
     }
+    /* 正文里的「跑一次 XX 任务」按钮也要跟着禁用/恢复 —— 见 setRunBtns */
+    setRunBtns(!!runT);
     if(!d.tasks.some(t=>t.running)){
       clearInterval(TASK_POLL); TASK_POLL=null;
       hideBanner();
@@ -2943,8 +3302,14 @@ $("btnAdd").onclick=addHolding;
     showBanner("正在等待后端服务启动…（请稍候）","info");
     await new Promise(r=>setTimeout(r,2000));
   }
-  if(up){ hideBanner(); await loadAll(); }
-  else { showBanner("连不上后端服务。请确认「控制台」里工具网站是运行中，然后刷新本页。","err"); }
+  if(up){ PAGE_READY=true; hideBanner(); }
+  else { showBanner("连不上后端服务。请确认「控制台」里工具网站是运行中 —— "+
+                    "一旦它起来，本页会自动补载，不用刷新。","err"); }
+  /* ★ 不论后端在不在，都要跑一次 loadAll 把各分页渲染出来。
+     原来只在 up 时才调用 —— 后端没起来的话整页永远停在「加载中…」，
+     用户看到的是"卡死"，而不是那句已经写在横幅里的原因。
+     loadAll 内部每个请求各自 catch，失败的那块自己会显示空状态，不会抛出来。 */
+  try{ await loadAll(); }catch(e){ console.error(e); }
   // ★ 常驻监视数据版本：任何来源（本页 / 控制台 / 定时器）触发的更新，
   //   跑完都会让本页四张卡片自动跟上，不再需要手动刷新页面。
   startStatusWatch();

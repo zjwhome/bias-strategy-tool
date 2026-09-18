@@ -389,11 +389,24 @@ def get_scan(key: str) -> dict | None:
 
 
 def get_last_run_id() -> tuple:
-    """最近一次任务执行的 (id, finished_at, task_key)。用于给前端做「版本号」。"""
+    """最近一次**已结束**任务执行的 (id, finished_at, task_key, status)。前端拿它做「版本号」。
+
+    ★★ 为什么必须排除 status='running'（2026-09-18 修复）：
+       `task_runs` 是**任务一开始就插入** running 行（start_task_run），跑完再回填。
+       早前这里取的是"最新一行"（不论状态），于是「版本号」在任务**刚启动**的那一秒
+       就变了 —— 前端 8 秒轮询到版本变化，立刻判定"任务跑完了"，
+       弹出一条「XX 已执行完成」的横幅，而那个任务其实要跑 20 分钟。
+       用户看到横幅、以为跑完了，拿到的却还是昨天的数据。
+       盘中/盘前任务更是几秒就结束，横幅会出现在任务刚开始、结果还没落库的瞬间。
+
+       改成只看 finished_at 非空的行后，版本号**只在真正跑完时**才变：
+       启动时不触发刷新，结束时才 loadAll + 弹横幅。
+    """
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, finished_at, task_key, status FROM task_runs ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+            """SELECT id, finished_at, task_key, status FROM task_runs
+               WHERE finished_at IS NOT NULL AND finished_at <> ''
+               ORDER BY id DESC LIMIT 1""").fetchone()
     if not row:
         return (0, "", "", "")
     return (row["id"], row["finished_at"] or "", row["task_key"] or "", row["status"] or "")

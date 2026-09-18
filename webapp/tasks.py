@@ -258,6 +258,47 @@ def _need_action(hs: list[dict]) -> list[dict]:
             or h["action"] != "持有"]
 
 
+def _hold_hint_block(act: list[dict], intraday: bool = False,
+                     failed: list[str] | None = None) -> dict | None:
+    """持仓提醒：只在真有票需要动手（或行情没取全）时返回一行指引，否则 None。
+
+    ★ 2026-09-18 用户要求：**持仓不要出现在其他菜单里**。
+      盘前 / 盘中 / 盘后三页的职责是「告诉你今天做什么」，不是复述持仓表 ——
+      同一张表在四个页面各印一遍，真正要看的结论被挤到屏外。
+      所以这里只留一行「有几只要处理 → 明细在「我的持仓」页」，
+      止损 / 止盈 / 到期这些**动作提醒一个字都不丢**，点一下就能跳过去看细节。
+      没有持仓、或全部正常持有时，一个字都不出现在这三页上。
+
+    ★ `failed` = 这次没取到实时价的持仓代码。**取不全也必须出声**：
+      缺价的那只在体检时会回落到本地收盘价，于是「盘中已经跌破止损线」这件事
+      会被收盘价掩盖 → 动作清单里什么都不会出现。持仓表已经从这三页删掉了，
+      如果这里也不说话，用户就**永远看不到**这次降级。
+      所以哪怕一只票都不需要动手，只要有取不到价的，也要留一行提示他去刷一次。
+    """
+    failed = failed or []
+    if not act and not failed:
+        return None
+
+    lines = []
+    if act:
+        n = len(act)
+        danger = sum(1 for x in act if x.get("level") == "danger")
+        head = f"**{n} 只持仓**触发了止损 / 止盈 / 到期条件"
+        if danger:
+            head += f"（其中 {danger} 只是止损，最优先处理）"
+        lines.append(head + "。")
+    if failed:
+        miss = "、".join(failed)
+        lines.append(f"⚠ 另有 {len(failed)} 只（{miss}）**没取到实时价**，"
+                     "这几只只按收盘价判断 —— 若盘中已跌破止损线，这里不会亮灯。")
+        lines.append("请打开「我的持仓」页点一次「⟳ 刷新持仓」，看准了再决定。")
+    lines.append("★ 明细（价格、盈亏、止损止盈线）请看左侧「**我的持仓**」页，本页不再重复列出。")
+    if intraday:
+        lines.append("盘中触发只作**预警**，最终以收盘价为准；不要因为盘中插针就急着动手。")
+    title = "⚠ 有持仓需要处理" if act else "⚠ 持仓行情没取全"
+    return dict(title=title, kind="text", text="\n".join(lines))
+
+
 # ------------------------------------------------------------------ 公共取数
 def _latest_daily() -> dict | None:
     return db.get_daily()
@@ -299,11 +340,10 @@ def run_premarket(log=None) -> dict:
     act = _need_action(hs)
 
     blocks = []
-    total = len(hs)
 
     # ---- 结论 ----
     if act:
-        headline = f"今天有 {len(act)} 项持仓动作要处理（见下方清单）。"
+        headline = f"今天有 {len(act)} 项持仓动作要处理（明细在「我的持仓」页）。"
         level = "danger" if any(x["level"] == "danger" for x in act) else "warn"
     elif trig:
         headline = "今天开盘可以按计划买入昨日候选股。"
@@ -312,14 +352,11 @@ def run_premarket(log=None) -> dict:
         headline = "今天不买也不卖，继续空仓等待。"
         level = "neutral"
 
-    # ---- 待卖清单 ----
-    if hs:
-        blocks.append(dict(
-            title=f"持仓体检（共 {total} 只，需处理 {len(act)} 只）",
-            kind="holdings",
-            rows=act if act else hs))
-    else:
-        blocks.append(dict(title="持仓体检", kind="text", text="当前没有持仓记录。"))
+    # ---- 持仓：本页不再列出持仓表（明细只在「我的持仓」页）----
+    #   仅当真有票需要动手时留一行「有几只 → 去哪看」，空仓或全部正常时一个字都不出现。
+    hb = _hold_hint_block(act)
+    if hb:
+        blocks.append(hb)
 
     # ---- 待买清单 ----
     if trig:
@@ -426,22 +463,29 @@ def run_intraday(log=None) -> dict:
         ev = evaluate_holdings(quotes=quotes, quote_date=qdate or today,
                               latest_market_date=today, intraday=True)
         act = _need_action(ev)
-        hold_block = dict(title=f"持仓实时体检（{len(ev)} 只，触发 {len(act)} 只）",
-                          kind="holdings", rows=act if act else ev)
+        # ★ 持仓表不在本页出现：只在真有票需要动手时留一行指引（见 _hold_hint_block）
+        #   fails 一并传进去：取不到实时价的那些只按收盘价判断，必须让用户知道
+        hold_block = _hold_hint_block(act, intraday=True,
+                                      failed=[str(c).zfill(6) for c in fails])
         if fails:
             log(f"[盘中] 持仓行情失败：{'、'.join(fails)}")
     else:
         log("[盘中] 当前无持仓，跳过持仓体检")
 
     # ---------------- ③ 结论 ----------------
+    # ★ 有持仓要动手时，这句话必须站在 headline 最前面（2026-09-18 审查后修）：
+    #   止损/止盈是「今天就该动手」的事，广度是否达标只决定「要不要买」。
+    #   原来这句话只谈广度，动手提醒埋在两张清单下面 —— 用户扫一眼头条就走了，
+    #   等于没说。提醒块同理，插到页首而不是页尾。
+    warn_pre = f"⚠ {len(act)} 只持仓需处理 · " if act else ""
     if not scan.get("ok"):
-        headline = "盘中扫描未成功 —— " + str(scan.get("msg") or "请稍后重试")
+        headline = warn_pre + "盘中扫描未成功 —— " + str(scan.get("msg") or "请稍后重试")
         level = "warn"
         blocks.append(dict(title="说明", kind="text", text=
             "盘中扫描需要联网拉取全市场实时快照。若一直失败，请检查网络后重试；"
             "也可以直接等到收盘后跑「盘后任务」。"))
         if hold_block:
-            blocks.append(hold_block)
+            blocks.insert(0, hold_block)
         detail = _render_detail(headline, blocks)
         return dict(headline=headline, level=level, blocks=blocks, detail=detail,
                     market_date=today)
@@ -465,6 +509,11 @@ def run_intraday(log=None) -> dict:
         headline = (f"今日暂无达标个股（主板 0 只；仅乖离率到位 {near_n} 只，可观察）"
                     if near_n else "今日暂无任何信号 —— 空仓等待")
         level = "neutral"
+    headline = warn_pre + headline
+    # 有「止损级」动作才把整页级别拉到 danger；止盈/到期是好消息，
+    # 不该把「今天可以出手」的绿灯染成警告色（头条里的 ⚠ 前缀已经说清楚了）。
+    if any(x["level"] == "danger" for x in act):
+        level = "danger"
 
     # ---------------- ④ 概览 ----------------
     prog = scan["progress"]
@@ -482,8 +531,17 @@ def run_intraday(log=None) -> dict:
     blocks.append(dict(title="今日盘中概览", kind="kv", rows=rows_kv))
 
     # ---------------- ⑤ 两张参考清单 ----------------
+    # ★ 清单在 strategy_core 里就被截断到前 list_limit 只，而 pool / near_n 是
+    #   全量计数。标题只写全量数字、下面却只有三十行，用户会以为程序漏算了股票。
+    #   两处口径都写出来：「共 N 只，此处列出前 M 只」。
+    def _cut(title: str, rows: list, total: int) -> str:
+        if total > len(rows):
+            return f"{title}（共 {total} 只，此处按乖离率升序列出前 {len(rows)} 只）"
+        return f"{title}（共 {total} 只，按乖离率升序）"
+
     if scan["candidates"]:
-        blocks.append(dict(title=f"★ 达标清单（主板，{pool} 只，按乖离率升序）",
+        blocks.append(dict(title=_cut("★ 达标清单 · 主板 · 条件全过",
+                                      scan["candidates"], pool),
                            kind="intraday", mode="hit", rows=scan["candidates"]))
     else:
         blocks.append(dict(title="达标清单：无", kind="text",
@@ -493,7 +551,8 @@ def run_intraday(log=None) -> dict:
                                  f"上市≥{scan['min_list_days']}日」的股票。\n"
                                  "这是常态，不是工具没跑。")))
     if scan["bias_only"]:
-        blocks.append(dict(title=f"仅乖离率符合（主板，{near_n} 只）—— 参考，未达标",
+        blocks.append(dict(title=_cut("仅乖离率符合 · 主板 —— 参考，未达标",
+                                      scan["bias_only"], near_n),
                            kind="intraday", mode="near", rows=scan["bias_only"]))
         blocks.append(dict(title="两张清单的区别", kind="text", text=
             "· **达标清单**：乖离率 + 放量 + 近5日跌 + 成交额 + 上市时长，条件全过 → 才是策略意义的买入候选。\n"
@@ -502,19 +561,12 @@ def run_intraday(log=None) -> dict:
             "★ 无论哪一张清单，**都不构成投资建议**；且盘中数据是推演，最终以收盘为准。"))
 
     # ---------------- ⑥ 持仓 ----------------
+    #   ★ 持仓表和出场规则都不在这三页出现（规则在「我的持仓」页的标签行里）。
+    #     只有真有票需要动手、或行情没取全时，才留一行指引把人送到那一页。
+    #   ★ 插到**页首**而不是追加到页尾：止损提醒排在两张候选清单后面，
+    #     等于把「今天该卖的」埋进「明天想买的」底下，顺序正好反了。
     if hold_block:
-        blocks.append(hold_block)
-        ec_ = exit_config()
-        t1, t2 = ec_["take_profit_tiers_pct"]
-        blocks.append(dict(title="持仓规则（以收盘价为准）", kind="text", text=
-            f"· 止损 {ec_['hard_stop_loss_pct']:+.0f}%（收盘确认，次日开盘卖）\n"
-            f"· 止盈 +{t1:.0f}% 卖一半 / +{t2:.0f}% 清仓；浮盈曾达 "
-            f"+{ec_['trailing_trigger_pct']:.0f}% 后回撤 {ec_['trailing_drawdown_pct']:.0f}% 清仓\n"
-            f"· 最长持有 {ec_['max_hold_days']} 个交易日\n"
-            "· 盘中只作**预警**，不要因为盘中插针就慌着动手。"))
-    else:
-        blocks.append(dict(title="持仓实时体检", kind="text",
-                           text="当前没有持仓记录，跳过。"))
+        blocks.insert(0, hold_block)
 
     detail = _render_detail(headline, blocks)
     log(f"[盘中] {headline}")
@@ -571,9 +623,10 @@ def run_postmarket(log=None, limit: int = 0, no_fetch: bool = False) -> dict:
             ]),
         ]
         act = _need_action(evaluate_holdings(latest_market_date=res.get("date") or ""))
-        if act:
-            blocks.append(dict(title=f"持仓体检（需处理 {len(act)} 只）",
-                               kind="holdings", rows=act))
+        hb = _hold_hint_block(act)
+        if hb:
+            # 数据不完整这条消息本身最重要（headline 不动），但持仓动作也要在页首可见
+            blocks.insert(0, hb)
         detail = _render_detail(headline, blocks)
         log(f"[盘后] {headline}")
         return dict(headline=headline, level="warn", blocks=blocks, detail=detail,
@@ -625,12 +678,18 @@ def run_postmarket(log=None, limit: int = 0, no_fetch: bool = False) -> dict:
                 dict(k="耗时", v=f"{res['elapsed_min']} 分钟"),
             ]))
 
+    # ★ 有持仓要动手时，这句话必须站在 headline 最前面（2026-09-18 审查后修）：
+    #   广度只决定「明天买不买」，持仓动作是「明天开盘就得卖」——
+    #   原来的头条只谈广度，动手提醒被埋在候选清单下面，顺序正好反了。
     if act:
-        blocks.append(dict(title=f"持仓体检（需处理 {len(act)} 只）",
-                           kind="holdings", rows=act))
-    elif hs:
-        blocks.append(dict(title=f"持仓体检（{len(hs)} 只，均正常持有）",
-                           kind="holdings", rows=hs))
+        headline = f"⚠ {len(act)} 只持仓需处理 · " + headline
+        if any(x["level"] == "danger" for x in act):
+            level = "danger"          # 只有真止损才升级为危险色，止盈/到期不吓人
+
+    # 持仓表不在本页出现：只有真有票需要动手时留一行指引（明细在「我的持仓」页）
+    hb = _hold_hint_block(act)
+    if hb:
+        blocks.insert(0, hb)
 
     detail = _render_detail(headline, blocks)
     log(f"[盘后] {headline}")
@@ -767,15 +826,6 @@ def _render_detail(headline: str, blocks: list[dict]) -> str:
         elif kind == "kv":
             for r in b.get("rows", []):
                 lines.append(f"   {r.get('k')}：{r.get('v')}")
-        elif kind == "holdings":
-            for r in b.get("rows", []):
-                lines.append(
-                    f"   {r.get('code')} {r.get('name') or '':<6} "
-                    f"买 {r.get('buy_price')} 现 {r.get('last')} "
-                    f"{('%+.2f%%' % r['pnl_pct']) if r.get('pnl_pct') is not None else ''} "
-                    f"持有{r.get('days_held')}日 → {r.get('action')}")
-                for a in r.get("alerts", []):
-                    lines.append(f"        · {a}")
         elif kind == "candidates":
             for i, r in enumerate(b.get("rows", []), 1):
                 lines.append(

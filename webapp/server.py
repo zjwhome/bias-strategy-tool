@@ -18,7 +18,7 @@
   GET    /api/intraday              最近一次盘中扫描结果（「盘中参考」卡片）
   POST   /api/intraday/refresh      轻量重跑一次盘中扫描（不写任务记录，供实时更新）
   GET    /api/intraday/refresh      实时刷新的运行态
-  GET    /api/holdings              我的持仓（含实时盈亏 + 卖出提示）
+  GET    /api/holdings              我的持仓（?live=1 强制用实时行情重算）
   POST   /api/holdings              新增持仓
   POST   /api/holdings/<id>/close   平仓
   DELETE /api/holdings/<id>         删除持仓记录
@@ -362,6 +362,10 @@ def _refresh_worker(data_date: str) -> None:
         if scan.get("ok"):
             db.save_scan("intraday", scan)          # 页面「盘中参考」读这一份
             ok = True
+            # ★ 用户要的「刷新盘中数据时，持仓一起更新」：
+            #   顺手把持仓的实时价算一遍并缓存。放在 running 归位**之前** ——
+            #   这样页面看到的「刷新完成」＝ 清单和持仓都已经是新的。
+            _warm_hold_cache(data_date)
         else:
             err = str(scan.get("msg") or "扫描未成功")
     except Exception as e:
@@ -419,19 +423,273 @@ def api_intraday_refresh_state():
 
 
 # ------------------------------------------------------------------ 持仓
-@app.get("/api/holdings")
-def api_holdings():
-    d = db.get_daily()
-    hs = tasks.evaluate_holdings(latest_market_date=d["date"] if d else "")
+"""
+★ 持仓的「实时价」（2026-09-18 新增）
+
+  以前 /api/holdings 一律用本地日线里的**最近收盘价**：用户盘中打开「我的持仓」，
+  看到的还是昨天（或上一交易日）的价，盈亏自然也是旧的 —— 明明在盯盘，数字却不动。
+
+  现在的取法（三句话）：
+
+   ① 「盘中参考」的实时刷新每跑完一次，**顺带**把持仓的实时价也算一遍并缓存在这里。
+      这正是用户要的「刷新盘中数据时，持仓也一起更新」。
+   ② 「我的持仓」页自己的那个刷新按钮走 `?live=1`，当场强制拉一次实时行情。
+   ③ 页面默认加载时：缓存还新鲜（≤ _HOLD_TTL 秒、且持仓集合没变）就用缓存里的实时价，
+      否则退回**收盘价**并明说"这是 MM-DD 收盘价"——绝不一边显示旧价一边让人以为那是实时。
+
+  ★ 缓存必须带指纹：刚登记 / 删除一只票时签名立刻变化 → 缓存自动作废，
+    不会拿旧结果冒充新持仓（这是最容易骗过眼睛的一类错）。
+  ★ 实时行情取不到时一律**降级 + 说明**，不假装成功。
+"""
+_HOLD_TTL = 120          # 实时持仓快照的新鲜期（秒）
+_HOLD = dict(ts=0.0, sig="", rows=None, quote_date="", quote_time="",
+             session="closed", asof="", src="")
+_HOLD_LOCK = threading.Lock()
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _hold_sig(rows: list[dict], ec: dict | None = None) -> str:
+    """持仓指纹 = 持仓集合（id + 代码 + 买入价）**加上**出场参数。
+
+    加/删/改一只票、或改了止损止盈 → 指纹立刻变 → 缓存自动作废。
+
+    ★ 为什么出场参数必须进指纹：缓存里的 rows 是**按当时的止损/止盈算出来的**
+      （action / alerts / 颜色都写死在结果里）。若用户把止损从 -6% 改成 -8%，
+      持仓集合没变、缓存也没过期，页面就会出现「标题写着 -8%、表格里的动作却还是
+      按 -6% 判的」—— 两处互相打架，最长持续 _HOLD_TTL 秒。带上参数，改完立刻重算。
+    """
+    base = "|".join(f"{r.get('id')}:{r.get('code')}:{r.get('buy_price')}"
+                    for r in sorted(rows, key=lambda x: (x.get("id") or 0)))
+    if not ec:
+        return base
+    tp = ec.get("take_profit_tiers_pct") or [0, 0]
+    return (f"{base}#{ec.get('hard_stop_loss_pct')}:{tp[0]}:{tp[1]}:"
+            f"{ec.get('trailing_trigger_pct')}:{ec.get('trailing_drawdown_pct')}:"
+            f"{ec.get('max_hold_days')}")
+
+
+def _quote_session(qdate: str, qtime: str) -> str:
+    """实时快照属于「交易中」还是「已收盘」。
+
+    ★ 15:00 之后实时价就是收盘价，再按秒去拉不会有新信息 ——
+      前端据此自动收手（与「盘中参考」的实时更新同一套逻辑）。
+    """
+    if qdate != _today_str():
+        return "closed"
+    try:
+        h, mi = (int(x) for x in str(qtime).split(":")[:2])
+        return "trading" if core.time_progress(h, mi) < 1.0 else "closed"
+    except Exception:
+        return "closed"
+
+
+def _clock_session() -> str:
+    """按本机时钟判断「现在还需要不需要刷新行情」。
+
+    ★ 为什么降级（收盘价）那条路上**不能**直接写 session="closed"：
+      取不到实时行情时页面拿到的是收盘价，但那不代表"已经收盘"。
+      若这里回 closed，前端的"收盘自动收手"会被触发，用户会看到
+      「已收盘」这个错误的停止理由 —— 真相是网络/数据源出了问题。
+      所以降级路径用**时钟**判断：交易时段内就让它继续重试，
+      超时/收盘了才收手（前端另有连续失败 3 次自动停止兜底）。
+    """
+    now = datetime.now()
+    if now.weekday() >= 5:                 # 周末不必刷
+        return "closed"
+    try:
+        return "trading" if core.time_progress(now.hour, now.minute) < 1.0 else "closed"
+    except Exception:
+        return "closed"
+
+
+def _eval_live(hs: list[dict]) -> dict:
+    """给这一批持仓拉一次实时行情并体检。
+
+    返回 dict(rows, got, total, quote_date, quote_time, src, err)；
+    **rows 为 None 表示这次不能标「实时」**（调用方必须降级，不能当成功）。
+
+    ★ 为什么必须「一只都不能少」才算成功（2026-09-18 审查后收紧）：
+      `evaluate_holdings` 对**没有实时价**的那只会静默回落到本地日线的收盘价
+      （tasks.py evaluate_holding 的 price=None 分支）。也就是说，2 只持仓里
+      只要有 1 只没取到实时价，拼出来的表就是「一半今天的价 + 一半昨天的价」。
+      这种表若整体标 `live=true`，界面上那格昨天的旧价会被当成实时价读 ——
+      用户照着它算盈亏、甚至照着它决定卖不卖。所以口径定为：
+      **要么整表实时，要么整表降级 + 明说「x/N 只有实时价」。**
+      持仓一般 ≤10 只，all-or-nothing 的代价只是偶尔退回收盘价，值得。
+    """
+    codes = [str(h["code"]).zfill(6) for h in hs]
+    try:
+        raw = core.fetch_live_quotes(codes) or {}
+    except Exception as e:
+        return dict(rows=None, got=0, total=len(codes),
+                    err=f"{type(e).__name__}: {e}")
+    quotes, qdate, qtime, src = {}, "", "", ""
+    for c in codes:
+        q = raw.get(c)
+        if q and q.get("close"):
+            quotes[c] = float(q["close"])
+            qdate = q.get("date") or qdate
+            qtime = q.get("time") or qtime
+            src = q.get("source") or src
+    got, total = len(quotes), len(codes)
+    if not quotes:
+        return dict(rows=None, got=0, total=total, err="数据源没有返回任何价格")
+    if got < total:
+        miss = "、".join(c for c in codes if c not in quotes)
+        return dict(rows=None, got=got, total=total, err=f"{miss} 没有实时价")
+    try:
+        rows = tasks.evaluate_holdings(quotes=quotes,
+                                       quote_date=qdate or _today_str(),
+                                       latest_market_date=_today_str(),
+                                       intraday=True)
+    except Exception as e:
+        return dict(rows=None, got=0, total=total, err=f"{type(e).__name__}: {e}")
+    return dict(rows=rows, got=got, total=total,
+                quote_date=qdate, quote_time=qtime, src=src, err="")
+
+
+def _warm_hold_cache(mdate: str = "") -> None:
+    """把持仓的实时体检结果算一遍写进缓存（「盘中参考」实时刷新顺带调用）。
+
+    刻意吞掉所有异常：持仓拉不到行情，不该把一次成功的全市场扫描判成失败。
+    """
+    t0 = time.time()
+    try:
+        hs = tasks.evaluate_holdings(latest_market_date=mdate or "")
+        if not hs:
+            with _HOLD_LOCK:
+                _HOLD.update(ts=0.0, sig="", rows=None)
+            return
+        ec = tasks.exit_config()
+        ev = _eval_live(hs)
+        if ev["rows"] is None:
+            # ★ 这一轮没拿到完整实时价，但缓存里可能还躺着**刚刚**拿到的实时价
+            #   （≤ _HOLD_TTL 秒）。那种情况继续用它是对的 —— 它确实还是实时数据，
+            #   清掉反而把好数据变成收盘价。新鲜度由 TTL 兜、身份由指纹兜，
+            #   这里不动缓存，只留服务端痕迹便于排查。
+            return
+        with _HOLD_LOCK:
+            if t0 < _HOLD["ts"]:      # 已经有更新的快照 → 拒旧盖新
+                return
+            _HOLD.update(ts=t0, sig=_hold_sig(hs, ec), rows=ev["rows"],
+                         quote_date=ev["quote_date"], quote_time=ev["quote_time"],
+                         session=_quote_session(ev["quote_date"], ev["quote_time"]),
+                         asof=ev["quote_time"] or ev["quote_date"], src=ev["src"])
+    except Exception:
+        pass
+
+
+def _task_busy() -> str:
+    """现在有没有任务正在改写数据？有就返回一句人话，没有返回空串。
+
+    ★ 为什么要把这件事告诉用户：盘后任务跑的时候，本地日线是**边写边变**的，
+      这期间刷出来的持仓价可能一部分来自新数据、一部分来自旧数据（数字参差）。
+      与其让用户盯着跳动的数字犯疑，不如在提示里直接说明白。
+    """
+    try:
+        if _REFRESH.get("running"):
+            return "「盘中参考」的实时刷新正在跑"
+        for k, label in (("postmarket", "盘后任务"), ("intraday", "盘中任务"),
+                         ("premarket", "盘前任务")):
+            if (tasks.STATE.get(k) or {}).get("running"):
+                return f"{label}正在跑"
+    except Exception:
+        pass
+    return ""
+
+
+def _hold_payload(force_live: bool) -> dict:
+    """组装 /api/holdings 的返回体。force_live=True 表示必须当场拉实时行情。
+
+    `session` 的口径统一成一句话：**"现在还有没有必要刷实时行情"** ——
+    前端的「收盘自动收手」只看这一个字段。实时成功时由快照时间判定，
+    降级/默认时由本机时钟判定（见 _clock_session 的注释）。
+    """
+    d = db.get_daily() or {}
+    mdate = d.get("date", "")
+    hs = tasks.evaluate_holdings(latest_market_date=mdate)
+    ec = tasks.exit_config()
     # 出场参数一并返回给前端：max_hold_days 用于标记「已超期」，
     # exit 用于让卡片标题里的「止损 -6% · 止盈 +6%/+10%」跟着配置走，不再写死。
-    ec = tasks.exit_config()
-    return jsonify(dict(ok=True, holdings=hs,
-                        max_hold_days=ec["max_hold_days"],
-                        exit=dict(stop_pct=ec["hard_stop_loss_pct"],
-                                  tp1_pct=ec["take_profit_tiers_pct"][0],
-                                  tp2_pct=ec["take_profit_tiers_pct"][1],
-                                  max_hold_days=ec["max_hold_days"])))
+    base = dict(exit=dict(stop_pct=ec["hard_stop_loss_pct"],
+                          tp1_pct=ec["take_profit_tiers_pct"][0],
+                          tp2_pct=ec["take_profit_tiers_pct"][1],
+                          max_hold_days=ec["max_hold_days"]),
+                max_hold_days=ec["max_hold_days"],
+                busy=_task_busy(), partial=False)
+    # 本地可能一张日线都还没有（全新装的库）→ 不能拼出「下面显示的是  收盘价」
+    day = f"{mdate} " if mdate else ""
+
+    if not hs:
+        # 空仓：不必浪费一次网络请求
+        base.update(holdings=[], live=False, data_mode="close",
+                    session=_clock_session(), asof=mdate, quote_date=mdate,
+                    quote_time="", src="", note="当前没有持仓记录。")
+        return base
+
+    now = time.time()
+    sig = _hold_sig(hs, ec)
+    with _HOLD_LOCK:
+        cache = dict(_HOLD)
+    fresh = (cache["rows"] is not None and cache["sig"] == sig
+             and now - cache["ts"] <= _HOLD_TTL)
+
+    if not force_live and fresh:
+        base.update(holdings=cache["rows"], live=True, data_mode="live",
+                    session=cache["session"], asof=cache["asof"],
+                    quote_date=cache["quote_date"], quote_time=cache["quote_time"],
+                    src=cache["src"], note="")
+        return base
+
+    partial = False
+    if force_live:
+        t0 = time.time()                      # 记下起跑时刻，用于「拒旧盖新」
+        ev = _eval_live(hs)
+        if ev["rows"] is not None:
+            ses = _quote_session(ev["quote_date"], ev["quote_time"])
+            asof = ev["quote_time"] or ev["quote_date"]
+            with _HOLD_LOCK:
+                # ★ 两个 live 请求并发时，谁先起跑谁的数据更新 —— 后完成的**旧**请求
+                #   不许把先完成的新快照盖回去（价差可能只有几秒，但方向必须是单调的）。
+                if t0 >= _HOLD["ts"]:
+                    _HOLD.update(ts=t0, sig=sig, rows=ev["rows"],
+                                 quote_date=ev["quote_date"],
+                                 quote_time=ev["quote_time"],
+                                 session=ses, asof=asof, src=ev["src"])
+            base.update(holdings=ev["rows"], live=True, data_mode="live", session=ses,
+                        asof=asof, quote_date=ev["quote_date"],
+                        quote_time=ev["quote_time"], src=ev["src"], note="")
+            return base
+        if ev["got"]:
+            # 部分成功：**整表不许标实时**，缺价的那几只前端显示的是收盘价。
+            # partial=True 让前端知道「这不是网络坏了，是某几只票没价」
+            #   → 状态行亮降级原因，但**不算作连续失败**，别把自动刷新掐掉
+            #   （停牌股几天都拿不到价，掐掉刷新等于让其余持仓也停止更新）。
+            partial = True
+            note = (f"实时价只拿到 {ev['got']}/{ev['total']} 只（{ev['err']}），"
+                    f"缺价那几只显示的是{day}收盘价 —— 整表未标「实时」。")
+        else:
+            note = f"实时行情暂时取不到（{ev['err']}），下面显示的是{day}收盘价。"
+    else:
+        note = f"下面显示的是{day}收盘价。点「⟳ 刷新持仓」可以拿到实时价。"
+
+    busy = base["busy"]
+    if busy:
+        note += f"\n★ {busy}，此刻数字可能新旧参差，等它跑完再看更准。"
+
+    base.update(holdings=hs, live=False, data_mode="close", partial=partial,
+                session=_clock_session(), asof=mdate, quote_date=mdate,
+                quote_time="", src="", note=note)
+    return base
+
+
+@app.get("/api/holdings")
+def api_holdings():
+    force_live = str(request.args.get("live", "")).lower() in ("1", "true", "yes")
+    return jsonify(dict(ok=True, **_hold_payload(force_live)))
 
 
 @app.post("/api/holdings")
@@ -800,7 +1058,29 @@ def main():
     threading.Thread(target=_scheduler_loop, daemon=True).start()
 
     try:
-        app.run(host=host, port=port, debug=False, threaded=True)
+        # ★ 这里刻意不用 app.run()，而是自己建服务器 —— 为了把监听套接字的
+        #   socket 超时显式清掉。
+        #
+        #   背景：strategy_core 在模块顶层做了 socket.setdefaulttimeout(20)，
+        #   那是为了治 akshare 的挂死请求（它内部 requests.get() 一个 timeout
+        #   都不传，实测 5017 只里有 8 只会永久挂住，导致每日更新卡死）。
+        #
+        #   但 socket 的「默认超时」是**进程级**的，而本进程会 import 那个模块。
+        #   于是 Werkzeug 的监听套接字、以及它 accept 出来的**每一个 HTTP 连接**，
+        #   都被动带上了 20 秒超时。眼下所有接口都是毫秒级返回，看不出问题 ——
+        #   可这是"靠运气活着"：将来任何一个慢一点的接口、或一次卡住的响应，
+        #   都会在第 20 秒被凭空掐断，日志上只留一句莫名其妙的中断，
+        #   排查起来极难（因为没人会想到超时是"隔壁模块顺手设的"）。
+        #
+        #   把下载用的 20 秒严格关在下载线程里：监听套接字 settimeout(None)
+        #   之后，accept 出来的连接也是阻塞式的（CPython 的 socket.accept 只在
+        #   "全局默认超时为 None" 时才强转阻塞，这里监听套接字自身超时为 None，
+        #   已足够）。
+        from werkzeug.serving import make_server
+        srv = make_server(host, port, app, threaded=True)
+        srv.socket.settimeout(None)   # 监听套接字：永不超时
+        srv.timeout = None            # 内部 select 轮询：不设上限
+        srv.serve_forever()
     except OSError as e:
         print("\n" + "!" * 68)
         print(f"  启动失败：端口 {port} 已被占用（{e}）")
